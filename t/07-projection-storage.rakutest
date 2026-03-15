@@ -1,0 +1,47 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+use Sourcing::ProjectionStorage;
+
+Sourcing::Plugin::Memory.use;
+
+class MyEvent { has $.id; has $.value }
+my $value = 0;
+my $count = 0;
+
+aggregation A {
+	has Int $.id is projection-id;
+	has Int $.value = 0;
+	multi method apply(MyEvent $_) {
+		$!value += .value;
+		$value = $!value;
+		done if ++$count >= 3
+	}
+}
+
+my $s = Sourcing::ProjectionStorage.new;
+
+start {
+	lives-ok { $s.register: A }
+
+	my $a = sourcing A, :1id;
+	sleep .1;
+	is $value, 0;
+	is $count, 0;
+	$a.my-event: :1value;
+	sleep .1;
+	is $value, 1;
+	is $count, 1;
+	$a.my-event: :2value;
+	sleep .1;
+	is $value, 3;
+	is $count, 2;
+	$a.my-event: :3value;
+	sleep .1;
+	is $value, 6;
+	is $count, 3;
+}
+
+await $s.start;
+
+done-testing

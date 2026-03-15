@@ -1,0 +1,134 @@
+use Test;
+
+use Sourcing;
+my $next-id = 1;
+
+class AccountOpened {
+	has UInt $.account-id is required;
+	has Rat  $.initial-amount where * >= 0;
+}
+
+class Deposited {
+	has UInt $.account-id is required;
+	has Rat  $.amount where * >= 0;
+	has UInt $.transfered-from;
+}
+
+class Withdrew {
+	has UInt $.account-id is required;
+	has Rat  $.amount where * >= 0;
+	has UInt $.transfered-to;
+}
+
+class AccountClosed {
+	has UInt $.account-id is required;
+}
+
+aggregation Account {
+	has UInt $.account-id is required is projection-id;
+	has Rat  $.amount where * >= 0;
+	has Bool $.active = False;
+
+	multi method apply(AccountOpened $_) {
+		$!account-id = .account-id;
+		$!amount     = .initial-amount;
+		$!active     = True;
+	}
+
+	multi method apply(Deposited $_) {
+		$!amount += .amount;
+	}
+
+	multi method apply(Withdrew $_) {
+		$!amount -= .amount;
+	}
+
+	multi method apply(AccountClosed $_) {
+		$!active = False;
+	}
+
+	method open-account(::?CLASS:U: Rat() $initial-amount where * >= 0) {
+		my $account-id = $next-id++;
+		my $new = sourcing self, :$account-id;
+		$new.account-opened: :$initial-amount;
+	}
+
+	method deposit(Rat() $amount where * >= 0) {
+		die "Account $!account-id not active" unless $!active;
+		$.deposited: :$amount
+	}
+
+	method withdraw(Rat() $amount where * >= 0) {
+		die "Account $!account-id not active" unless $!active;
+		die "Not enough money to withdraw $amount on account $!account-id" unless $!amount >= $amount;
+		$.withdrew: :$amount
+	}
+
+	method transfer(UInt $to, Rat() $amount) {
+		die "Account from and to are the same account" if $!account-id == $to;
+		die "Account $!account-id not active" unless $!active;
+		die "Not enough money to withdraw $amount on account $!account-id" unless $!amount >= $amount;
+		
+		my $to-account = sourcing ::?CLASS, :account-id($to);
+		die "Account $to to transfer to is not active" unless $to-account.active;
+
+		$.withdrew: :$amount, :transfered-to($to);
+		$.deposited: :account-id($to), :$amount, :transfered-from($!account-id);
+	}
+
+	method close-account {
+		die "Cannot close account $!account-id that still has amount" if $!amount;
+		$.account-closed
+	}
+}
+
+use Sourcing::Plugin::Memory;
+Sourcing::Plugin::Memory.use;
+
+my $e1 = Account.open-account: 100;
+my $e2 = Account.open-account: 600;
+
+is-deeply
+	(my $a1 = sourcing Account, account-id => $e1.account-id),
+	Account.new(account-id => 1, amount => 100.0, active => Bool::True)
+;
+is-deeply
+	(my $a2 = sourcing Account, account-id => $e2.account-id),
+	Account.new(account-id => 2, amount => 600.0, active => Bool::True)
+;
+
+$a1.deposit:  300;
+$a2.withdraw: 200;
+
+is-deeply
+	($a1 = sourcing Account, account-id => $e1.account-id),
+	Account.new(account-id => 1, amount => 400.0, active => Bool::True)
+;
+is-deeply
+	($a2 = sourcing Account, account-id => $e2.account-id),
+	Account.new(account-id => 2, amount => 400.0, active => Bool::True)
+;
+
+$a1.transfer: $a2.account-id, $a1.amount;
+
+is-deeply
+	($a1 = sourcing Account, account-id => $e1.account-id),
+	Account.new(account-id => 1, amount => 0.0, active => Bool::True)
+;
+is-deeply
+	($a2 = sourcing Account, account-id => $e2.account-id),
+	Account.new(account-id => 2, amount => 800.0, active => Bool::True)
+;
+
+$a1.close-account;
+
+is-deeply
+	($a1 = sourcing Account, account-id => $e1.account-id),
+	Account.new(account-id => 1, amount => 0.0, active => Bool::False)
+;
+is-deeply
+	($a2 = sourcing Account, account-id => $e2.account-id),
+	Account.new(account-id => 2, amount => 800.0, active => Bool::True)
+;
+
+done-testing

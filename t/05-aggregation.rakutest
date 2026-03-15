@@ -1,0 +1,52 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+
+my $emitted-events;
+Sourcing::Plugin::Memory.use.supply.tap: -> $event {
+	$emitted-events = $event
+}
+
+class MyEvent { has $.a; has $.b; has $.x }
+
+aggregation A {
+	has Int $.a is projection-id;
+	has Str $.b;
+	multi method apply(MyEvent $i) { $!a += $i }
+}
+
+isa-ok A.new, A;
+
+my $a = A.new: :42a;
+
+is-deeply $a.my-event(:b<bla>), MyEvent.new: :42a, :b<bla>;
+is-deeply $emitted-events, MyEvent.new: :42a, :b<bla>;
+
+aggregation B {
+	has Int $.a is projection-id;
+	has Str $.b;
+	multi method apply(MyEvent $i) is projection-id< x > { $!a += $i }
+}
+
+isa-ok B.new, B;
+
+my $b = B.new: :42a;
+
+is-deeply $b.my-event(:1a, :b<bla>), MyEvent.new: :1a, :b<bla>, :42x;
+is-deeply $emitted-events, MyEvent.new: :1a, :b<bla>, :42x;
+
+aggregation C {
+	has Int $.a is projection-id;
+	has Str $.b is projection-id;
+	multi method apply(MyEvent $i) is projection-id-map{ a => "x", b => "a" } { $!a += $i }
+}
+
+isa-ok C.new, C;
+
+my $c = C.new: :42a, :b<bla>;
+
+is-deeply $c.my-event(:b<ble>), MyEvent.new: :a<bla>, :b<ble>, :42x;
+is-deeply $emitted-events, MyEvent.new: :a<bla>, :b<ble>, :42x;
+
+done-testing
+

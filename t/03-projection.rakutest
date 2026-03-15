@@ -1,0 +1,90 @@
+use Test;
+use Sourcing;
+
+projection A {
+	has Int $.a is projection-id;
+	has Str $.b;
+	multi method apply(Int $i) { $!a += $i }
+	multi method apply(Str $s) { $!b ~= $s }
+}
+
+isa-ok A.new, A;
+
+my $a = A.new: :1a;
+isa-ok $a, A;
+is $a.a, 1;
+
+$a = A.new: :initial-events[1, 2, 3];
+isa-ok $a, A;
+is $a.a, 6;
+
+$a = A.new: :initial-events[1, 2, 3], :3a;
+isa-ok $a, A;
+is $a.a, 9;
+
+ok $a.apply: 3;
+is $a.a, 12;
+
+
+$a = A.new: :b<a>;
+isa-ok $a, A;
+is $a.b, "a";
+
+$a = A.new: :initial-events<a b c>;
+isa-ok $a, A;
+is $a.b, "abc";
+
+$a = A.new: :initial-events<b c d>, :b<a>;
+isa-ok $a, A;
+is $a.b, "abcd";
+
+ok $a.apply: "bla";
+is $a.b, "abcdbla";
+
+$a = A.new: :initial-events[1, 2, "b", "c", 3, "d"], :b<a>, :1a;
+isa-ok $a, A;
+is $a.a, 7;
+is $a.b, "abcd";
+
+is $a.^projection-ids, <$!a>;
+
+is $a.^handled-events.map(*.^name), <Int Str>;
+
+my %handled-map := $a.^handled-events-map;
+
+ok %handled-map;
+
+is-deeply %handled-map{Int}, %(:a<a>);
+is-deeply %handled-map{Str}, %(:a<a>);
+
+projection B {
+	has Int $.a is projection-id;
+	has Str $.b;
+	multi method apply(Int $i) is projection-id-map{ a => "x" } { $!a += $i }
+	multi method apply(Str $s) is projection-id< x >          { $!b ~= $s }
+}
+
+%handled-map := B.^handled-events-map;
+is-deeply %handled-map{Int}, %(:a<x>);
+is-deeply %handled-map{Str}, %(:a<x>);
+
+projection C {
+	has Int $.a is projection-id;
+	has Str $.b is projection-id;
+	multi method apply(Int $i) is projection-id-map{ a => "x" } { $!a += $i }
+	multi method apply(Str $s) is projection-id-map{ b => "y" } { $!b ~= $s }
+}
+
+%handled-map := C.^handled-events-map;
+is-deeply %handled-map{Int}, %(:a<x>, :b<b>);
+is-deeply %handled-map{Str}, %(:a<a>, :b<y>);
+
+projection D {
+	has Int $.a is projection-id = 0;
+	multi method apply(Any $i) { $!a++ }
+}
+
+is-deeply D.new(:initial-events[]), D.new: :0a;
+is-deeply D.new(:initial-events[1,2,3]), D.new: :3a;
+
+done-testing

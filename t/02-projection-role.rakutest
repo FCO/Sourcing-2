@@ -1,0 +1,50 @@
+use Test;
+
+use Sourcing::Projection;
+
+class A does Sourcing::Projection {
+	has Int $.a;
+	has Str $.b;
+	multi method apply(Int $i) { $!a += $i }
+	multi method apply(Str $s) { $!b ~= $s }
+}
+
+isa-ok A.new, A;
+
+my $a = A.new: :1a;
+isa-ok $a, A;
+is $a.a, 1;
+
+$a = A.new: :initial-events[1, 2, 3];
+isa-ok $a, A;
+is $a.a, 6;
+
+$a = A.new: :initial-events[1, 2, 3], :3a;
+isa-ok $a, A;
+is $a.a, 9;
+
+ok $a.apply: 3;
+is $a.a, 12;
+
+
+$a = A.new: :b<a>;
+isa-ok $a, A;
+is $a.b, "a";
+
+$a = A.new: :initial-events<a b c>;
+isa-ok $a, A;
+is $a.b, "abc";
+
+$a = A.new: :initial-events<b c d>, :b<a>;
+isa-ok $a, A;
+is $a.b, "abcd";
+
+ok $a.apply: "bla";
+is $a.b, "abcdbla";
+
+$a = A.new: :initial-events[1, 2, "b", "c", 3, "d"], :b<a>, :1a;
+isa-ok $a, A;
+is $a.a, 7;
+is $a.b, "abcd";
+
+done-testing
