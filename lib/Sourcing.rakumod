@@ -25,7 +25,7 @@ sub sourcing(Sourcing::Projection:U $proj, *%ids) is export {
 	# my $*SourcingReplay = True;
 
 	my $new = $proj.new: |%ids, |%data, :@initial-events;
-	$new.^attributes.first(*.name eq '$!__current-verion__').set_value: $new, $last-id;
+	$new.^attributes.first(*.name eq '$!__current-version__').set_value: $new, $last-id;
 
 	$*SourcingConfig.store-cached-data: $new, :last-id($last-id + @initial-events);
 	$new

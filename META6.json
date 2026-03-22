@@ -23,7 +23,8 @@
     "Sourcing::Projection": "lib/Sourcing/Projection.rakumod",
     "Sourcing::ProjectionId": "lib/Sourcing/ProjectionId.rakumod",
     "Sourcing::ProjectionIdMap": "lib/Sourcing/ProjectionIdMap.rakumod",
-    "Sourcing::ProjectionStorage": "lib/Sourcing/ProjectionStorage.rakumod"
+    "Sourcing::ProjectionStorage": "lib/Sourcing/ProjectionStorage.rakumod",
+    "Sourcing::X::OptmisticLocked": "lib/Sourcing/X/OptmisticLocked.rakumod"
   },
   "resources": [
   ],

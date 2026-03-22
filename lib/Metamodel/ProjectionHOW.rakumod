@@ -15,7 +15,7 @@ method compose(Mu $proj, |) {
 
 method update($proj) {
 	my %ids = $proj.^projection-id-pairs;
-	my $attr    = $proj.^attributes.first: *.name eq '$!__current-verion__';
+	my $attr    = $proj.^attributes.first: *.name eq '$!__current-version__';
 	my $last-id = $attr.get_value($proj) // -1;
 
 	my %map{Mu:U} = $proj.^handled-events-map;

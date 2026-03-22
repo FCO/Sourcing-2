@@ -15,7 +15,10 @@ method compose(Mu $aggregation, |) {
 				}).Map,
 				|c
 			;
-			$*SourcingConfig.emit: $new-event
+			my $curr-version-attr = $.^attributes.first: *.name eq '$!__current-version__';
+			my $current-version = $curr-version-attr.get_value: self;
+
+			$*SourcingConfig.emit: $new-event, :$current-version
 				if $*SourcingConfig && !$*SourcingReplay;
 
 			return $new-event

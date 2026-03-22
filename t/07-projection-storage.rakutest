@@ -22,22 +22,19 @@ aggregation A {
 my $s = Sourcing::ProjectionStorage.new;
 
 start {
+	await Promise.in: .1;
 	lives-ok { $s.register: A }
 
 	my $a = sourcing A, :1id;
-	sleep .1;
 	is $value, 0;
 	is $count, 0;
 	$a.my-event: :1value;
-	sleep .1;
 	is $value, 1;
 	is $count, 1;
 	$a.my-event: :2value;
-	sleep .1;
 	is $value, 3;
 	is $count, 2;
 	$a.my-event: :3value;
-	sleep .1;
 	is $value, 6;
 	is $count, 3;
 }

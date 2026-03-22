@@ -1,6 +1,6 @@
 unit role Sourcing::Plugin;
 
-method emit($)                    {...}
+method emit($, :$current-version) {...}
 method get-events(%ids, %map)     {...}
 method get-events-after($, %, %)  {...}
 method supply                     {...}

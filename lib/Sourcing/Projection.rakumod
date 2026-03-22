@@ -1,6 +1,6 @@
 unit role Sourcing::Projection;
 
-has $!__current-verion__;
+has $!__current-version__;
 
 multi method new(:@initial-events!, |c) {
 	my $obj = self.bless: |c;
