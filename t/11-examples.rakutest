@@ -1,0 +1,90 @@
+use Test;
+use lib 'examples';
+use Sourcing;
+use Sourcing::Plugin::Memory;
+use ShoppingCart;
+use TodoList;
+use BankAccount;
+
+Sourcing::Plugin::Memory.use;
+
+my $Cart = Cart;
+my $TodoList = TodoList;
+my $BankAccount = BankAccount;
+
+subtest 'Projection with direct apply' => {
+    class Inc { has Int $.id; has Int $.amt }
+    projection P {
+        has Int $.id is required is projection-id;
+        has Int $.value = 0;
+        multi method apply(Inc $e) { $!value += $e.amt }
+    }
+    my $p = P.new: :id(1);
+    $p.apply: Inc.new(:id(1), :amt(5));
+    is $p.value, 5, "Apply increments value";
+    $p.apply: Inc.new(:id(1), :amt(3));
+    is $p.value, 8, "Multiple applies accumulate";
+}
+
+subtest 'Projection with initial events' => {
+    class Ev { has Int $.id; has Int $.v }
+    projection S {
+        has Int $.id is required is projection-id;
+        has Int $.value = 0;
+        multi method apply(Ev $e) { $!value += $e.v }
+    }
+    my $s = S.new: :id(1), :initial-events[Ev.new(:id(1), :v(10))];
+    is $s.value, 10, "Initial event sets value";
+    my $s2 = S.new: :id(1), :initial-events[Ev.new(:id(1), :v(5)), Ev.new(:id(1), :v(7))];
+    is $s2.value, 12, "Multiple initial events accumulate";
+}
+
+subtest 'Shopping Cart from example module' => {
+    my $c = sourcing $Cart, :1cart-id;
+    is $c.total, 0.0, "Initial total is 0";
+    $c.add-item: "Book", 2, 25.00;
+    $c.^update;
+    is $c.total, 50.00, "After adding item total is 50";
+    $c.add-item: "Pen", 3, 5.00;
+    $c.^update;
+    is $c.total, 65.00, "After second item total is 65";
+    $c.checkout;
+    $c.^update;
+    is $c.checked-out, True, "Cart is checked out";
+}
+
+subtest 'Todo List from example module' => {
+    my $t = sourcing $TodoList, :1todo-id;
+    is $t.items.elems, 0, "Empty initially";
+    $t.add: "Learn Raku";
+    $t.^update;
+    is $t.items.elems, 1, "One item added";
+    $t.add: "Write tests";
+    $t.^update;
+    is $t.items.elems, 2, "Two items";
+    $t.complete;
+    $t.^update;
+    is $t.completed-count, 1, "One completed";
+    $t.complete;
+    $t.^update;
+    is $t.completed-count, 2, "Both completed";
+}
+
+subtest 'Bank Account from example module' => {
+    my $b = sourcing $BankAccount, :42account-id;
+    is $b.balance, 0.0, "Initial balance is 0";
+    $b.deposit: 1000.00;
+    $b.^update;
+    is $b.balance, 1000.00, "After deposit";
+    is $b.transaction-count, 1, "One transaction";
+    $b.withdraw: 250.00;
+    $b.^update;
+    is $b.balance, 750.00, "After withdrawal";
+    is $b.transaction-count, 2, "Two transactions";
+    $b.withdraw: 100.00;
+    $b.^update;
+    is $b.balance, 650.00, "After another withdrawal";
+    is $b.transaction-count, 3, "Three transactions";
+}
+
+done-testing;

@@ -6,12 +6,13 @@ Sourcing is a Raku (Perl 6) event sourcing library that provides a declarative a
 
 1. [Overview](#overview)
 2. [Architecture](#architecture)
-3. [Core API Reference](#core-api-reference)
-4. [Metamodel Classes](#metamodel-classes)
-5. [Plugin System](#plugin-system)
-6. [Traits and Declarations](#traits-and-declarations)
-7. [Storage System](#storage-system)
-8. [Usage Patterns](#usage-patterns)
+3. [Conceptual Overview](#conceptual-overview)
+4. [Core API Reference](#core-api-reference)
+5. [Metamodel Classes](#metamodel-classes)
+6. [Plugin System](#plugin-system)
+7. [Traits and Declarations](#traits-and-declarations)
+8. [Storage System](#storage-system)
+9. [Usage Patterns](#usage-patterns)
 
 ---
 
@@ -19,10 +20,10 @@ Sourcing is a Raku (Perl 6) event sourcing library that provides a declarative a
 
 Event sourcing is a pattern where state changes are stored as a sequence of events rather than updating current state directly. The Sourcing library provides:
 
-- **Projections**: Read-only representations that evolve by applying events
-- **Aggregations**: Stateful entities that can both handle and emit events
-- **Declarative ID mapping**: Map event properties to projection identifiers
-- **Plugin architecture**: Pluggable event storage backends
+- **Projections** (Query side / Q in CQRS): Read-only representations that evolve by applying events to build query-optimized read models. Multiple projections can be derived from the same event stream for different purposes.
+- **Aggregations** (Command side / C in CQRS): Stateful entities that validate commands against current state, enforce business invariants, and emit events that describe state changes.
+- **Declarative ID mapping**: Map event properties to projection identifiers using traits (`is projection-id`, `is projection-id<>`)
+- **Plugin architecture**: Pluggable event storage backends (in-memory, database, etc.)
 
 ### Key Design Decisions
 
@@ -35,30 +36,252 @@ Event sourcing is a pattern where state changes are stored as a sequence of even
 
 ## Architecture
 
+### Component Relationships
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Sourcing.rakumod                         │
-│  (exports: sourcing, traits, EXPORTHOW/DECLARE for metaclasses)│
+│  (exports: sourcing, traits, EXPORTHOW/DECLARE for metaclasses) │
 └─────────────────────────────────────────────────────────────────┘
-         │                        │
-         ▼                        ▼
-┌─────────────────┐      ┌─────────────────┐
-│  Roles/         │      │  Metamodel/      │
-│  - Projection   │      │  - ProjectionHOW │
-│  - Aggregation  │      │  - AggregationHOW
-│  - ProjectionId │      │  - ProjectionIdContainer
-│  - ProjectionIdMap │   │  - EventHandlerContainer
-└─────────────────┘      └─────────────────┘
+          │                        │
+          ▼                        ▼
+┌────────────────────┐   ┌──────────────────────────┐
+│  Roles/            │   │  Metamodel/              │
+│  - Projection      │   │  - ProjectionHOW         │
+│  - Aggregation     │   │  - AggregationHOW        │
+│  - ProjectionId    │   │  - ProjectionIdContainer │
+│  - ProjectionIdMap │   │  - EventHandlerContainer │
+└────────────────────┘   └──────────────────────────┘
+          │
+          ▼
+┌───────────────────────┐
+│  Sourcing::           │
+│  - Plugin             │
+│  - Plugin::Memory     │
+│  - ProjectionStorage  │
+│  - X::OptimisticLocked│
+└───────────────────────┘
+```
+
+### CQRS + Event Sourcing Flow
+
+```
+                         ┌─────────────────────────────────────────────┐
+                         │              COMMAND SIDE (C)               │
+                         │                                             │
+   Command ──────────►  ┌──────────────────┐                           │
+                        │   Aggregation    │                           │
+                        │  (consistency    │                           │
+                        │   boundary)      │                           │
+                        │                  │                           │
+                        │  • Validates     │                           │
+                        │  • Emits events  │                           │
+                        │  • Enforces      │                           │
+                        │    invariants    │                           │
+                        └────────┬─────────┘                           │
+                                 │                                     │
+                                 │ emit(event)                         │
+                                 ▼                                     │
+                         ┌──────────────────┐                          │
+                         │   Event Store    │◄── append-only log       │
+                         │   (Plugin)       │    of immutable facts    │
+                         └────────┬─────────┘                          │
+                                  │                                    │
+                                  │ Supply (stream)                    │
+                                  ▼                                    │
+                         ┌─────────────────────────────────────────────┤
+                         │              QUERY SIDE (Q)                 │
+                         │                                             │
+                  ┌──────┴──────┐                                      │
+                  │  Projection  │                                     │
+                  │  Storage     │                                     │
+                  │  (registry)  │                                     │
+                  └──────┬──────┘                                      │
+                         │ routes events                               │
+                         ▼                                             │
+              ┌──────────────────────┐                                 │
+              │    Projections       │                                 │
+              │  (read models)       │                                 │
+              │                      │                                 │
+              │  • Dashboard view    │                                 │
+              │  • Analytics view    │                                 │
+              │  • Fraud detection   │                                 │
+              │  • Audit log         │                                 │
+              └──────────────────────┘                                 │
+                                                                       │
+                         ┌─────────────────────────────────────────────┘
+                         │
+                  Queries read from projections
+                  (never from the event store directly)
+```
+
+### How Aggregations and Projections Relate
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        Single Domain Event                           │
+│                     e.g., OrderPlaced(order-id, total)               │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │
+            ┌──────────────────┼──────────────────┐
+            │                  │                  │
+            ▼                  ▼                  ▼
+   ┌─────────────────┐ ┌──────────────┐  ┌─────────────────┐
+   │ Order Aggregate │ │  Order       │  │  Revenue        │
+   │ (write model)   │ │  Summary     │  │  Projection     │
+   │                 │ │  Projection  │  │                 │
+   │ • Enforced:     │ │              │  │ • Derived:      │
+   │   order total   │ │ • Derived:   │  │   daily totals  │
+   │   cannot be     │ │   status,     │  │ • Derived:      │
+   │   negative      │ │   item count  │  │   product sales │
+   │ • Emits:        │ │ • Used by:    │  │ • Used by:      │
+   │   OrderPlaced   │ │   order list  │  │   finance dashboard
+   └─────────────────┘ └──────────────┘  └─────────────────┘
+```
+
+---
+
+## Conceptual Overview
+
+This section explains the **why** behind projections and aggregations — not just how to declare them, but what problems they solve, when to use each, and how they fit together in a CQRS + Event Sourcing architecture.
+
+### The Core Problem
+
+In traditional CRUD applications, the same data model serves both writes and reads. This creates tension:
+
+- **Write optimization** demands normalization, constraints, and transactional consistency.
+- **Read optimization** demands denormalization, pre-computed aggregates, and query-specific shapes.
+
+Event Sourcing + CQRS resolves this tension by **separating the write model from the read model**. In the Sourcing library, this separation is embodied by two constructs:
+
+| | **Aggregation** | **Projection** |
+|---|---|---|
+| CQRS role | **Command side (C)** | **Query side (Q)** |
+| What it does | Validates commands, emits events | Consumes events, builds read models |
+| Direction | Write → Event | Event → State |
+| Consistency | Strong (within boundary) | Eventually consistent |
+| Rebuildable | No (source of truth) | Yes (always from events) |
+| How many per stream | One | Many |
+
+### Projections: The Read Model
+
+**A projection transforms an event stream into a query-optimized representation.**
+
+Think of a projection as a materialized view that stays up to date by listening to events. You don't need to replay all events every time you need to display data — the projection maintains current state.
+
+**When to use a projection:**
+
+- You need to display data to a user (list, detail view, dashboard)
+- You need to run analytics or reports
+- You need to feed data to an external system
+- You need the same events shaped differently for different consumers
+
+**Key characteristics:**
+
+1. **Read-only** — Projections do not have auto-generated emit methods. They are observers of the event stream. (Enforced by convention — nothing prevents manual `$*SourcingConfig.emit` calls, but this breaks CQRS separation.)
+2. **Rebuildable** — Given the full event stream, any projection can be reconstructed from scratch. This means you can add new projections at any time and backfill them by replaying history.
+3. **Eventually consistent** — There is a delay between an event being emitted and a projection reflecting it. Design UIs and APIs to tolerate this.
+4. **Purpose-specific** — Each projection serves a single query purpose. Don't build a "god projection" that serves every consumer. As Dennis Doomen puts it: *"Don't share projections."*
+5. **Storage-agnostic** — Projections can persist to SQL, NoSQL, files, or in-memory. Each projection chooses its own storage mechanism based on query patterns.
+6. **Resilient** — Projection code should never crash. A malformed event should be logged and skipped, not bring down the entire system.
+
+**Best practices (from industry practitioners):**
+
+- **Don't enforce constraints in projections.** Constraints belong in aggregations. A projection showing negative inventory is a *reporting* problem, not a validation problem.
+- **Keep projections close to the consumer.** The team that needs the data should own the projection.
+- **Name projections after their purpose**, not their source. `CustomerDashboardView`, not `CustomerEventProjection`.
+
+### Aggregations: The Consistency Boundary
+
+**An aggregation is the consistency boundary for business logic. It validates commands against current state and emits events that describe state changes.**
+
+The aggregate is the gatekeeper. Every state change must pass through it. It answers the question: *"Given what I know right now, is this command valid?"*
+
+**When to use an aggregation:**
+
+- You need to enforce a business rule that must be atomically consistent (e.g., "balance cannot go negative")
+- You need to validate a command against current state before allowing it
+- You need an audit trail of every state change as an immutable event
+- You need to replay history to understand how something reached its current state
+
+**Key characteristics:**
+
+1. **Emits events** — Aggregations are the only construct that can emit events. Events are immutable facts: *"AccountOpened"*, *"AmountWithdrawn"*, *"OrderShipped"*.
+2. **Enforces invariants** — Business rules that must always be true are enforced inside command methods on the aggregate. If a command would violate an invariant, it `die`s before emitting any events.
+3. **One aggregate = one event stream = one transaction** — All events for a given aggregate instance form a single append-only stream. Modifications happen one aggregate at a time.
+4. **State is encapsulated** — Internal state (`$!attributes`) is private. External code interacts through command methods and reads public attributes.
+5. **References by ID only** — Aggregations reference other aggregates by their projection ID, never by holding a direct reference.
+
+**Aggregate design rules:**
+
+- **Design around invariants.** The boundary of an aggregate should enclose all data needed to enforce a business rule atomically.
+- **Keep aggregates small.** A few hundred events max. Large aggregates become slow to replay and prone to contention.
+- **Name after domain concepts**, not technical terms. `BankAccount`, not `AccountEntity`.
+- **One aggregate per transaction.** Don't try to modify multiple aggregates atomically — use eventual consistency and compensating events instead.
+
+### How They Work Together
+
+```
+User clicks "Withdraw $100"
          │
          ▼
-┌─────────────────┐
-│  Sourcing::    │
-│  - Plugin       │
-│  - Plugin::Memory│
-│  - ProjectionStorage │
-│  - X::OptimisticLocked│
-└─────────────────┘
+┌─────────────────────┐
+│  Command arrives    │
+│  at aggregation     │
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│  Aggregate loads    │
+│  current state      │
+│  from event stream  │
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│  Validates:         │
+│  "Is balance ≥ 100?"│
+│  → Yes, proceed     │
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│  Emits event:       │
+│  Withdrawn($100)    │
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────┐
+│  Event is appended to the event store       │
+│  and broadcast on the Supply:               │
+│                                             │
+│  ┌──────────────────┐  ┌──────────────────┐ │
+│  │ BalanceProjection│  │ AuditProjection  │ │
+│  │ balance -= 100   │  │ log(withdrawn)   │ │
+│  └──────────────────┘  └──────────────────┘ │
+│  ┌──────────────────┐  ┌──────────────────┐ │
+│  │ FraudProjection  │  │ DashboardProj.   │ │
+│  │ check_pattern()  │  │ update_chart()   │ │
+│  └──────────────────┘  └──────────────────┘ │
+└─────────────────────────────────────────────┘
+         │
+         ▼
+   User sees updated
+   balance (from projection)
 ```
+
+### Choosing Between Projection and Aggregation
+
+Ask these questions:
+
+| Question | Answer → |
+|---|---|
+| Does this need to **validate** a business rule before allowing the change? | **Aggregation** |
+| Does this need to **emit** an event? | **Aggregation** |
+| Does this need to **display** data to a user or API? | **Projection** |
+| Do you need the same events shaped **differently** for different consumers? | **Multiple Projections** |
+| Can this be rebuilt from scratch by replaying events? | **Projection** |
+| Is this the **source of truth** for whether an action is allowed? | **Aggregation** |
 
 ---
 
@@ -70,27 +293,28 @@ Event sourcing is a pattern where state changes are stored as a sequence of even
 
 **Exports**:
 
-| Symbol | Type | Description |
-|--------|------|-------------|
-| `sourcing` | Sub | Creates or retrieves a projection/aggregation instance |
-| `projection` | Constant | Metaclass declaration for projections |
-| `aggregation` | Constant | Metaclass declaration for aggregations |
-| `is projection-id` | Trait | Marks attribute as projection identifier |
-| `is projection-id-map` | Trait | Maps apply method to custom ID field |
-| `is projection-id<>` | Trait | Shorthand for single ID mapping |
-| `is command` | Trait | Wraps method to trigger `^update` after call |
+| Symbol                   | Type     | Description                                            |
+|--------------------------|----------|--------------------------------------------------------|
+| `sourcing`                 | Sub      | Creates a fresh projection/aggregation instance            |
+| `projection`               | Constant | Metaclass declaration for projections                  |
+| `aggregation`              | Constant | Metaclass declaration for aggregations                 |
+| `is projection-id`         | Trait    | Marks attribute as projection identifier               |
+| `is projection-id-map`     | Trait    | Maps apply method to custom ID field                   |
+| `is projection-id<>`       | Trait    | Shorthand for single ID mapping                        |
+| `is command`               | Trait    | Wraps method with reset, replay, validation, and auto-retry |
+| `is command(False)`        | Trait    | Marks a method as explicitly NOT a command. Prevents `AggregationHOW` from auto-generating an event-emitting method with the same name. |
 
 **Public API**:
 
 ```raku
 sub sourcing(Sourcing::Projection:U $proj, *%ids) is export
-# Creates or retrieves a projection instance with given IDs
+# Creates a fresh projection/aggregation instance with given IDs
 # - $proj: The projection/aggregation class
 # - %ids: Named parameters for projection ID values
-# Returns: Instance with initial events applied
+# Returns: Fresh instance with all events applied
 
 sub sourcing-config is rw is export
-# Global configuration accessor (PROCESS::<%SourcingConfig>)
+# Global configuration accessor (PROCESS::<$SourcingConfig>)
 ```
 
 **Example Usage**:
@@ -98,28 +322,51 @@ sub sourcing-config is rw is export
 use Sourcing;
 
 my $proj = sourcing MyProjection, :id(42);
-# Creates/retrieves MyProjection with id=42, applies all events
+# Creates fresh MyProjection instance with id=42, applies all events
 ```
 
 **How it works**:
-1. Gets cached data via `$*SourcingConfig.get-cached-data`
-2. Retrieves events after last version via `$*SourcingConfig.get-events-after`
-3. Creates instance with `initial-events` named parameter
-4. Sets `__current-version__` attribute to track last processed event ID
-5. Stores updated cached data
+1. Retrieves all events for the given identity from the store via `$*SourcingConfig.get-events-after: -1`
+2. Creates a fresh instance with all events applied
+3. Sets `__current-version__` to total events minus one
+4. Stores updated cached data
 
 ---
 
 ### Sourcing::Projection
 
-**Purpose**: Role applied to all projection classes via metaclass. Provides event application infrastructure.
+**Purpose**: Role applied to all projection classes via metaclass. Provides the event application infrastructure that transforms an event stream into a read-optimized model.
+
+**Conceptual role**: A projection is the **read side** of CQRS. It listens to events and builds a state representation optimized for querying. Projections never emit events — they are pure consumers of the event stream.
+
+> *"Projections in Event Sourcing are a way to derive the current state from an event stream. You don't need to replay all the events every time you need to display data."* — Derek Comartin
 
 **Location**: `lib/Sourcing/Projection.rakumod`
+
+**Key characteristics**:
+
+| Property | Description |
+|---|---|
+| **No auto-generated emits** | Projections do not have auto-generated emit methods. They observe; they don't command. (Enforced by convention.) |
+| **Rebuildable** | Given the full event stream, any projection can be reconstructed from scratch. Add a new projection today and backfill it by replaying history. |
+| **Eventually consistent** | There is a delay between an event being emitted and a projection reflecting it. This is by design. |
+| **Purpose-specific** | Each projection serves a single query purpose. Don't build a "god projection." |
+| **Storage-agnostic** | Each projection chooses its own storage mechanism (SQL, NoSQL, in-memory, files) based on query patterns. |
+| **Resilient** | Projection code should never crash. Malformed events should be logged and skipped. |
+
+**Best practices**:
+
+1. **Don't enforce constraints.** Constraints belong in aggregations. A projection showing stale or unexpected data is a reporting concern, not a validation concern.
+2. **One projection per query purpose.** If two consumers need different data shapes, give them separate projections.
+3. **Keep projections close to the consumer.** The team that needs the data should own the projection.
+4. **Name projections after their purpose**, not their source. `CustomerDashboardView`, not `CustomerEventProjection`.
+5. **Make apply methods idempotent.** Applying the same event twice should produce the same state.
 
 **Attributes**:
 ```raku
 has $!__current-version__;
-# Internal version tracking for optimistic concurrency
+# Internal version tracking: index of last event applied during replay.
+# Set to -1 when no events exist, or @events.elems - 1 after replay.
 ```
 
 **Public Methods**:
@@ -135,19 +382,149 @@ multi method new(:@initial-events!, |c)
 - Provides `apply` method signature that event handlers must match
 - Works with `EventHandlerContainer` to discover event types
 
+**Example — A projection for a customer dashboard**:
+
+```raku
+use Sourcing;
+
+class CustomerNameChanged  { has $.customer-id; has $.name }
+class CustomerAddressChanged { has $.customer-id; has $.address }
+class OrderPlaced          { has $.customer-id; has $.total; has $.date }
+
+# Projection: customer dashboard view
+projection CustomerDashboard {
+    has Int $.customer-id is projection-id;
+    has Str $.name;
+    has Str $.address;
+    has Int $.order-count = 0;
+    has Rat $.total-spent = 0;
+
+    multi method apply(CustomerNameChanged $e) {
+        $!name = $e.name;
+    }
+
+    multi method apply(CustomerAddressChanged $e) {
+        $!address = $e.address;
+    }
+
+    multi method apply(OrderPlaced $e) {
+        $!order-count++;
+        $!total-spent += $e.total;
+    }
+}
+
+# Usage: get the dashboard for a specific customer
+my $dashboard = sourcing CustomerDashboard, :customer-id(42);
+say "Customer: $dashboard.name";
+say "Orders: $dashboard.order-count";
+say "Total spent: $dashboard.total-spent";
+```
+
+This projection listens to three different event types and builds a single read model optimized for displaying a customer's dashboard. The same events could feed a completely different projection (e.g., `RevenueByMonth`) without any coupling between them.
+
 ---
 
 ### Sourcing::Aggregation
 
-**Purpose**: Empty role marker that identifies a class as an aggregation (can emit events).
+**Purpose**: Role marker that identifies a class as an aggregation — the **write side** of CQRS. Aggregations validate commands against current state and emit events that describe state changes.
+
+**Conceptual role**: An aggregation is the **consistency boundary** for business logic. It is the gatekeeper that answers: *"Given what I know right now, is this command valid?"* If yes, it emits an immutable event. If no, it rejects the command (via `die`).
+
+> *"An aggregate is a cluster of domain objects that can be treated as a single unit. It enforces invariants — business rules that must always be true — within its boundary."* — Domain-Driven Design
 
 **Location**: `lib/Sourcing/Aggregation.rakumod`
+
+**Key characteristics**:
+
+| Property | Description |
+|---|---|
+| **Emits events** | Aggregations are the only construct that can emit events. Events are immutable facts: `OrderPlaced`, `AmountWithdrawn`. |
+| **Enforces invariants** | Business rules that must always be true are enforced inside command methods. If a command would violate an invariant, it `die`s before emitting any events. |
+| **One aggregate = one event stream = one transaction** | All events for a given aggregate instance form a single append-only stream. |
+| **State is encapsulated** | Internal state (`$!attributes`) is private. External code interacts through command methods and reads public attributes. |
+| **References by ID only** | Aggregations reference other aggregates by their projection ID, never by holding a direct reference. |
+| **Source of truth** | The event stream emitted by an aggregate is the authoritative record of what happened. State can always be rebuilt from it. |
+
+**Best practices**:
+
+1. **Design around invariants.** The boundary of an aggregate should enclose all data needed to enforce a business rule atomically. If two rules must be enforced together, they belong in the same aggregate.
+2. **Keep aggregates small.** A few hundred events max. Large aggregates become slow to replay and prone to optimistic locking contention.
+3. **Name after domain concepts**, not technical terms. `BankAccount`, not `AccountEntity`.
+4. **One aggregate per transaction.** Don't try to modify multiple aggregates atomically — use eventual consistency and compensating events instead.
+5. **Validate before emitting.** Put all domain checks at the top of command methods, before any `$.event` calls. A `die` prevents any events from being persisted.
+6. **Never mutate state directly in commands.** State changes happen *only* through event emission and the corresponding `apply` methods.
 
 **Note**: This is primarily a marker role. The actual event emission functionality is implemented in `AggregationHOW` metaclass which adds command methods that call `$*SourcingConfig.emit`.
 
 **Interactions**:
 - Composed by `AggregationHOW` metaclass
-- Inherits from `ProjectionHOW`, so aggregations are also projections
+- Inherits from `ProjectionHOW`, so aggregations are also projections (they can consume events via `apply`)
+- `AggregationHOW` auto-generates event-emitting methods for each handled event type
+
+**Example — An aggregate handling a command with validation**:
+
+```raku
+use Sourcing;
+
+class AccountOpened   { has $.account-id; has $.initial-balance }
+class AmountDeposited { has $.account-id; has $.amount }
+class AmountWithdrawn { has $.account-id; has $.amount }
+class AccountClosed   { has $.account-id }
+
+aggregation BankAccount {
+    has Int $.account-id is projection-id;
+    has Rat $.balance = 0;
+    has Bool $.is-open = False;
+
+    # State changes come ONLY from events
+    multi method apply(AccountOpened $e) {
+        $!balance = $e.initial-balance;
+        $!is-open = True;
+    }
+    multi method apply(AmountDeposited $e) { $!balance += $e.amount }
+    multi method apply(AmountWithdrawn $e) { $!balance -= $e.amount }
+    multi method apply(AccountClosed $e)   { $!is-open = False }
+
+    # Command: validates before emitting
+    method withdraw(Rat $amount) is command {
+        die "Account is closed" unless $!is-open;
+        die "Amount must be positive" if $amount <= 0;
+        die "Insufficient funds: balance is $!balance" if $!balance < $amount;
+
+        $.amount-withdrawn: :$amount;
+    }
+
+    method deposit(Rat $amount) is command {
+        die "Account is closed" unless $!is-open;
+        die "Amount must be positive" if $amount <= 0;
+
+        $.amount-deposited: :$amount;
+    }
+
+    method close() is command {
+        die "Account is already closed" unless $!is-open;
+        die "Cannot close account with non-zero balance ($!balance)"
+            if $!balance != 0;
+
+        $.account-closed;
+    }
+}
+
+# Usage:
+my $account = sourcing BankAccount, :account-id(1);
+$account.account-opened: initial-balance => 1000;
+
+$account.^update;  # Replay to get current state
+$account.withdraw(200);  # ✅ Emits AmountWithdrawn event
+$account.withdraw(900);  # ❌ dies: "Insufficient funds: balance is 800"
+```
+
+In this example, the `BankAccount` aggregate enforces three invariants:
+1. Closed accounts cannot accept deposits or withdrawals
+2. Withdrawals cannot exceed the current balance
+3. Accounts can only be closed when the balance is exactly zero
+
+These rules are enforced *before* any event is emitted, guaranteeing that the event stream never contains invalid state transitions.
 
 ---
 
@@ -210,11 +587,12 @@ method compose(Mu $proj, |)
 # 3. Calls nextsame for standard composition
 
 method update($proj)
-# Applies new events since last version:
-# 1. Gets current version from $!__current-version__
-# 2. Fetches new events via $*SourcingConfig.get-events-after
-# 3. Applies each event via $proj.apply: $event
-# 4. Updates version and returns new ID
+# Resets and replays the aggregate:
+# 1. Creates a fresh instance to get default values
+# 2. Resets all mutable attributes (preserving projection-ids)
+# 3. Fetches all events for the given identity from the store (from version -1)
+# 4. Applies each event via $proj.apply: $event
+# 5. Updates version to total events applied - 1
 ```
 
 **Introspection Methods** (provided by composed roles):
@@ -253,7 +631,7 @@ method compose(Mu $aggregation, |)
 #    - Returns created event
 ```
 
-**Automatic Command Generation**:
+**Automatic Event Emitting Method Generation**:
 For an event `MyEvent` with projection ID `$!id`:
 - Creates method `my-event($value)` 
 - Sets `id` field from `$!id` attribute
@@ -375,6 +753,19 @@ method use(|c)
 # Example: Sourcing::Plugin::Memory.use
 ```
 
+### Dynamic Variables
+
+```raku
+$*SourcingConfig
+# The active plugin instance, set by Plugin.use
+# Used throughout the library for event storage and retrieval
+
+$*SourcingReplay
+# When truthy, suppresses event emission from auto-generated methods
+# Set this to True when replaying events to prevent double-emission
+# Example: my $*SourcingReplay = True;
+```
+
 ---
 
 ### Sourcing::Plugin::Memory
@@ -403,7 +794,8 @@ multi method emit($event)
 multi method emit($event, :$type, :%ids!, :$current-version!)
 # Emit with optimistic locking support
 # - Gets cached data for type/ids
-# - TODO: Implement CAS for optimistic locking
+# - Uses CAS (compare-and-swap) for atomic version checking
+# - Throws X::OptimisticLocked if version mismatch detected
 
 method get-events(%ids, %map)
 # Filter events by IDs and event type map
@@ -417,6 +809,14 @@ method number-of-events
 
 multi method store-cached-data($proj where *.HOW.^can("data-to-store"), UInt :$last-id!)
 # Store using custom data-to-store method
+# If your projection defines a `data-to-store` method, it will be called
+# to produce the cached data instead of extracting all public attributes.
+# This allows selective serialization — only cache what you need.
+#
+# Example:
+#   method data-to-store {
+#       :$.id, :$.name, :$.email  # omit sensitive fields
+#   }
 
 multi method store-cached-data($proj, Int :$last-id!)
 # Store by extracting all public attributes
@@ -425,7 +825,7 @@ multi method store-cached-data(Mu:U $proj, %ids, %data, Int :$last-id!)
 # Core storage: stores in %!store{ProjectionName}{IDs} => {data, last-id}
 
 method get-cached-data(Mu:U $proj, %ids) is rw
-# Retrieves cached state, returns Map with:
+# Retrieves cached state, returns Hash with:
 # - last-id: atomicint (default -1)
 # - data: Hash of projection attributes
 ```
@@ -444,7 +844,7 @@ sub get-events(@events, %ids, %map)
 
 ### Sourcing::ProjectionStorage
 
-**Purpose**: Special projection that maintains a registry of all projections. Enables automatic projection updates.
+**Purpose**: Special projection that maintains a registry of all projections. Enables automatic projection updates. Declared as an `aggregation` so it can emit `ProjectionRegistered` events while also consuming events to route them to registered projections.
 
 **Location**: `lib/Sourcing/ProjectionStorage.rakumod`
 
@@ -467,7 +867,7 @@ class ProjectionRegistered {
     has Mu:U $.type;
     has Str $.name;
     has Str @.ids;
-    has Hash %.map;
+    has Hash %.map{Mu};
 }
 
 class Registry {
@@ -481,11 +881,11 @@ class Registry {
 **Public Methods**:
 ```raku
 method start
-# Starts the supply:
+# Starts the supply and returns a Promise that resolves when the supply completes:
 # 1. Creates sourcing self.WHAT
 # 2. Listens to $*SourcingConfig.supply
 # 3. Applies events to this storage projection
-# 4. Emits ProjectionRegistered events for registered types
+# 4. Returns a Promise (awaitable) that resolves when the supply is done
 
 multi method apply(ProjectionRegistered (Mu:U :$type, Str :$name, :%map, :@ids))
 # Registers a new projection type:
@@ -497,12 +897,18 @@ method register(Mu:U $type)
 # Emits ProjectionRegistered event
 
 multi method apply(Any $event)
-# Applies event to all matching projections:
+# Routes event to all matching projections:
 # 1. Look up registries for event type
 # 2. For each registered projection:
 #    - Extract ID values from event
-#    - Call sourcing to get/create projection
-#    - Apply event
+#    - Call sourcing to get/create projection (replays all events)
+#    - Events are applied through the projection's apply method
+#
+# NOTE: This has O(n²) performance for large event streams since each event
+# triggers a full replay of all events for every registered projection.
+# For production use with large event streams, consider implementing
+# incremental projection updates (applying only the new event to an
+# existing cached projection instance) rather than full replay.
 ```
 
 **Usage**:
@@ -588,33 +994,398 @@ Shorthand via `is projection-id<>`:
 projection C {
     has Int $.id is projection-id;
     
-    # Same as above
+    # Maps the single projection-id attribute to the 'x' field on the event
     method apply(MyEvent $e) is projection-id< x > { }
 }
 ```
+This trait requires exactly one `is projection-id` attribute on the class
+and maps it to the specified event field name.
 
 ### Command Methods
 
-Mark methods to trigger `^update` after execution:
+Commands are the **write entry points** for aggregations. They exist to provide a safe place to validate business rules against the current aggregate state *before* emitting events that become immutable facts.
+
+#### Why Commands Exist: Two Levels of Validation
+
+Every command passes through two validation gates:
+
+1. **Superficial validation** — Required fields, format checks, valid ranges. This happens *before* the command reaches the domain layer (e.g., at the API or CLI boundary). A command with missing required fields should never be instantiated.
+
+2. **Domain validation** — Business rules that depend on aggregate state. This happens *inside* the command method. Examples: "withdrawal cannot exceed account balance", "order cannot be cancelled after shipping", "counter cannot go below zero."
+
+Commands are the right place for domain validation because they run against the **most recent state** of the aggregation. The aggregate is the consistency boundary — one aggregate = one event stream = one transaction. All modifications flow through command methods on the aggregate root.
+
 ```raku
-aggregation Counter {
-    has Int $.id is projection-id;
-    has Int $.count = 0;
-    
-    method apply(Incremented $e) { $!count += $e.amount }
-    
-    method increment(Int $amount) is command {
-        $!count += $amount;
-        $.incremented: :$amount;  # Emits event
+# ✅ Good: domain validation inside command
+method withdraw(Decimal $amount) is command {
+    die "Insufficient funds" if $!balance < $amount;
+    $.withdrawn: :$amount;
+}
+
+# ❌ Bad: validation outside the aggregate (race condition window)
+sub withdraw-from-outside($agg, $amount) {
+    die "Insufficient funds" if $agg.balance < $amount;  # stale by the time this runs
+    $agg.withdrawn: :amount($amount);
+}
+```
+
+#### The Command Lifecycle
+
+Every `is command` method follows this exact flow:
+
+```
+Command called
+    │
+    ▼
+┌─────────────────────────────────┐
+│ 1. ^update: Reset + Replay      │
+│    • Reset all mutable attrs    │
+│      to their defaults          │
+│    • Replay ALL events from     │
+│      the store onto the agg     │
+│    • Aggregate is now fresh     │
+└──────────────┬──────────────────┘
+               │
+               ▼
+┌─────────────────────────────────┐
+│ 2. Execute command body         │
+│    • Validate against state     │
+│    • die() if validation fails  │
+│    • Emit events via $.event    │
+└──────────────┬──────────────────┘
+               │
+               ▼
+┌─────────────────────────────────┐
+│ 3. Optimistic lock check        │
+│    • Store detects if new       │
+│      events appeared since      │
+│      the ^update call           │
+│    • Throws X::OptimisticLocked  │
+│      if contention detected     │
+└──────────────┬──────────────────┘
+               │
+         ┌──────┴──────┐
+         │             │
+    Success         Contention
+         │             │
+         ▼             ▼
+    Return result   Retry (up to 5x)
+                    Go to step 1
+                    │
+                    ▼ (all retries exhausted)
+              Throw X::OptimisticLocked
+```
+
+#### Automatic Retry Behavior
+
+When `X::OptimisticLocked` is thrown, the command **automatically retries** — up to 5 attempts. This is intentional and correct for event sourcing, unlike CRUD systems where automatic retry is discouraged.
+
+**Why automatic retry works in event sourcing:**
+
+| CRUD Systems | Event Sourcing with Aggregates |
+|---|---|
+| User edits a form with merged state they need to review | Command parameters are the *intent*, not the state |
+| Automatic retry overwrites someone else's changes | Aggregate is rebuilt from events — no "merged state" confusion |
+| User needs to see what changed and re-decide | Command is re-validated against freshly loaded state each retry |
+| State is mutated in place | State is deterministic: same events + same command = same result |
+
+The `^update` call at the start of each retry **resets all mutable attributes to their defaults** and **replays every event from the store**. This guarantees the command body always runs against a clean, current snapshot — there is no stale state to corrupt.
+
+After 5 failed attempts, the command **re-throws the last `Sourcing::X::OptimisticLocked` exception**. This is preferable to returning `Nil` because:
+
+- **No silent failures**: An exception is unambiguous — the caller cannot accidentally ignore it or confuse it with a legitimate `Nil` from another code path.
+- **Exception carries context**: The exception object can be inspected, logged, or caught specifically.
+- **Consistent with Raku error handling**: Exceptional conditions throw exceptions, not sentinel values.
+
+The caller should handle this explicitly if they want to degrade gracefully:
+
+```raku
+try {
+    $account.withdraw(100);
+    say "Withdrawal successful";
+    CATCH {
+        when Sourcing::X::OptimisticLocked {
+            say "Could not process withdrawal — aggregate under heavy contention. Try again.";
+        }
     }
 }
 ```
 
-After calling `$counter.increment(5)`, the aggregation automatically calls `$counter.^update` to fetch and apply new events.
+#### Command Method Patterns
+
+**Simple command — emits one event:**
+
+```raku
+aggregation Counter {
+    has Int $.id is projection-id;
+    has Int $.count = 0;
+
+    method apply(Incremented $e) { $!count += $e.amount }
+
+    method increment(Int $amount) is command {
+        $.incremented: :$amount;
+    }
+}
+```
+
+**Command with validation that may `die` before emitting:**
+
+```raku
+aggregation BankAccount {
+    has Str $.id is projection-id;
+    has Decimal $.balance = 0;
+
+    method apply(Deposited $e)   { $!balance += $e.amount }
+    method apply(Withdrawn $e)   { $!balance -= $e.amount }
+
+    method withdraw(Decimal $amount) is command {
+        die "Insufficient funds: balance is $!balance, requested $amount"
+            if $!balance < $amount;
+        die "Withdrawal amount must be positive"
+            if $amount <= 0;
+        $.withdrawn: :$amount;
+    }
+}
+```
+
+**Command that emits multiple events:**
+
+```raku
+aggregation Order {
+    has Str $.id is projection-id;
+    has Str  $.status = 'pending';
+    has Item @.items;
+
+    method apply(ItemAdded $e)     { @!items.push: $e.item }
+    method apply(OrderPlaced $e)   { $!status = 'placed' }
+    method apply(OrderShipped $e)  { $!status = 'shipped' }
+
+    method place-order() is command {
+        die "Cannot place empty order" if @!items.elems == 0;
+        die "Order already placed" if $!status ne 'pending';
+
+        $.order-placed;
+        $.payment-requested: total => @!items.map(*.price).sum;
+    }
+}
+```
+
+**Command that uses aggregate state for validation:**
+
+```raku
+aggregation InventoryItem {
+    has Str $.id is projection-id;
+    has Int $.quantity = 0;
+    has Bool $.discontinued = False;
+
+    method apply(StockAdded $e)      { $!quantity += $e.amount }
+    method apply(StockRemoved $e)    { $!quantity -= $e.amount }
+    method apply(Discontinued $e)    { $!discontinued = True }
+
+    method remove-stock(Int $amount) is command {
+        die "Item is discontinued" if $!discontinued;
+        die "Not enough stock: have $!quantity, need $amount"
+            if $!quantity < $amount;
+        $.stock-removed: :$amount;
+    }
+}
+```
+
+#### Best Practices
+
+1. **Validate before emitting.** A `die` inside a command prevents any events from being persisted. Put all domain validation at the top of the method, before any `$.event` calls.
+
+2. **Never mutate state directly.** Commands must not change `$!attributes` directly. State changes happen *only* through event emission and the corresponding `apply` methods.
+
+   ```raku
+   # ❌ Wrong: direct mutation
+   method bad-increment() is command {
+       $!count += 1;          # bypasses event stream
+       $.incremented: :amount(1);
+   }
+
+   # ✅ Correct: emit event, let apply handle state
+   method good-increment() is command {
+       $.incremented: :amount(1);
+   }
+   ```
+
+3. **Keep validation logic idempotent.** Given the same aggregate state and the same command arguments, the validation should always produce the same result. This is what makes automatic retry safe.
+
+4. **No side effects beyond event emission.** Commands should not write to databases, send emails, call external APIs, or modify global state. Those are side effects of *event handling*, not command execution.
+
+5. **Commands are methods on the aggregation.** They have access to `self` and all private attributes (`$!state`). Use this access for domain validation — that's the whole point.
+
+6. **Return value is the emitted event on success; throws `X::OptimisticLocked` after exhausting retries.** The command returns whatever the last `$.event` call returns (the event object). If all 5 retries fail due to contention, the last `X::OptimisticLocked` exception is re-thrown. Do not design commands around their return value.
+
+#### What Commands Are NOT
+
+- **Commands are not CRUD updates.** A CRUD `UPDATE users SET balance = balance - 100` mutates state directly. A command validates against current state, then emits an event that *describes* the change. The event is the source of truth, not the resulting state.
+
+- **Commands are not queries.** Commands exist to *change* state (by emitting events). If you need to read state, use the aggregation's public attributes or a projection. Commands return the emitted event on success or throw `X::OptimisticLocked` if retries are exhausted — they should not return computed data.
+
+  ```raku
+  # ❌ Wrong: command used as a query
+  method get-balance-and-withdraw(Decimal $amount) is command {
+      return $!balance;  # don't do this
+  }
+
+  # ✅ Correct: read state directly, use command only for writes
+  say $account.balance;           # read
+  $account.withdraw(100);         # write via command
+  ```
+
+- **Commands should not return computed data.** The return value exists only to signal success (event object). If retries are exhausted, an `X::OptimisticLocked` exception is thrown — there is no silent `Nil` return. If the caller needs data after a command executes, read it from the aggregation's public attributes — they are now up to date after the replay.
+
+  ```raku
+  $account.withdraw(100);
+  say "New balance: $account.balance()";  # read from updated aggregation
+  ```
 
 ---
 
 ## Usage Patterns
+
+### When to Use a Projection vs an Aggregation
+
+Use this decision flow:
+
+```
+Do you need to VALIDATE a business rule before allowing a change?
+  ├─ Yes → Use an AGGREGATION with command methods
+  └─ No
+      │
+      Do you need to DISPLAY or QUERY data?
+        ├─ Yes → Use a PROJECTION
+        └─ No
+            │
+            Do you need to EMIT events?
+              ├─ Yes → Use an AGGREGATION
+              └─ No → You probably don't need Sourcing for this
+```
+
+**Concrete examples**:
+
+| Scenario | Use | Why |
+|---|---|---|
+| User withdraws money from account | **Aggregation** | Must validate balance ≥ amount before allowing |
+| Show account balance on dashboard | **Projection** | Read-only, query-optimized display |
+| Generate monthly revenue report | **Projection** | Aggregates events into a report shape |
+| Place an order (check stock, reserves items) | **Aggregation** | Must atomically validate and reserve |
+| Show order history for a customer | **Projection** | Read-only list, possibly paginated |
+| Detect fraudulent login patterns | **Projection** | Observes events, flags anomalies |
+| Cancel an order (only if not yet shipped) | **Aggregation** | Must validate order state before allowing |
+
+### Complete CQRS Flow: Command → Aggregate → Event → Projection → Query
+
+This example demonstrates the full lifecycle of a domain operation:
+
+```raku
+use Sourcing;
+use Sourcing::Plugin::Memory;
+
+# ─── Events ───────────────────────────────────────────────────
+class ItemAddedToCart     { has $.cart-id; has $.item-name; has $.price }
+class CartCheckedOut      { has $.cart-id; has $.total; has $.customer-id }
+class OrderShipped        { has $.order-id; has $.tracking-number }
+
+# ─── AGGREGATION (Command Side) ───────────────────────────────
+# Enforces: cart total cannot exceed $10,000
+#           cart must have items before checkout
+
+aggregation ShoppingCart {
+    has Int $.cart-id is projection-id;
+    has Rat $.total = 0;
+    has Int $.item-count = 0;
+    has Bool $.checked-out = False;
+
+    multi method apply(ItemAddedToCart $e) {
+        $!total += $e.price;
+        $!item-count++;
+    }
+
+    multi method apply(CartCheckedOut $e) {
+        $!checked-out = True;
+    }
+
+    method add-item(Str $item-name, Rat $price) is command {
+        die "Cart is already checked out" if $!checked-out;
+        die "Cart total would exceed $10,000" if $!total + $price > 10_000;
+
+        $.item-added-to-cart: :$item-name, :$price;
+    }
+
+    method checkout(Int $customer-id) is command {
+        die "Cart is already checked out" if $!checked-out;
+        die "Cannot checkout empty cart" if $!item-count == 0;
+
+        $.cart-checked-out: :total($!total), :$customer-id;
+    }
+}
+
+# ─── PROJECTION 1: Customer Order Summary (Query Side) ────────
+# Purpose: Show customer their order history with totals
+
+projection CustomerOrderSummary {
+    has Int $.customer-id is projection-id;
+    has Int $.order-count = 0;
+    has Rat $.total-spent = 0;
+
+    multi method apply(CartCheckedOut $e) {
+        $!order-count++;
+        $!total-spent += $e.total;
+    }
+}
+
+# ─── PROJECTION 2: Revenue Dashboard (Query Side) ─────────────
+# Purpose: Show business-wide revenue metrics
+
+projection RevenueDashboard {
+    has Int $.id is projection-id = 1;  # Singleton projection
+    has Int $.total-orders = 0;
+    has Rat $.total-revenue = 0;
+    has Rat $.average-order-value = 0;
+
+    multi method apply(CartCheckedOut $e) {
+        $!total-orders++;
+        $!total-revenue += $e.total;
+        $!average-order-value = $!total-revenue / $!total-orders;
+    }
+}
+
+# ─── USAGE: Full CQRS Flow ────────────────────────────────────
+
+Sourcing::Plugin::Memory.use;
+
+# 1. COMMAND: User adds items to cart (aggregate validates)
+my $cart = sourcing ShoppingCart, :cart-id(1);
+$cart.add-item("Laptop", 1200);
+$cart.add-item("Mouse", 25);
+
+# 2. COMMAND: User checks out (aggregate validates and emits event)
+$cart.^update;  # Replay to get current state
+$cart.checkout(42);
+
+# 3. PROJECTION: Query the customer's order summary
+my $summary = sourcing CustomerOrderSummary, :customer-id(42);
+say "Orders: $summary.order-count";       # → 1
+say "Total spent: $summary.total-spent";  # → 1225
+
+# 4. PROJECTION: Query the revenue dashboard
+my $revenue = sourcing RevenueDashboard, :id(1);
+say "Total orders: $revenue.total-orders";           # → 1
+say "Total revenue: $revenue.total-revenue";         # → 1225
+say "Avg order: $revenue.average-order-value";       # → 1225
+```
+
+**What happened in this flow**:
+
+1. **Command** (`add-item`, `checkout`) arrived at the **aggregation**
+2. **Aggregation** validated business rules against current state
+3. **Aggregation** emitted events (`ItemAddedToCart`, `CartCheckedOut`)
+4. **Events** were appended to the event store and broadcast on the Supply
+5. **Projections** consumed the events and updated their read models
+6. **Queries** read from projections (fast, no event replay needed)
 
 ### Basic Projection Creation and Event Application
 
@@ -782,7 +1553,14 @@ aggregation A {
     method apply(MyEvent $_) { $!value += .value }
     
     method value-is($is) is command {
-        $.my-event: :value($is);
+        $.my-event: :value($is);    # If a new event was emitted before this
+                                    # this method will return a specific exception
+                                    # to show its not on the correct state
+                                    # so, everything done until here should be ignored
+                                    # the new state should be gotten (or generated from
+                                    # an empt obj and applying all the events) and the
+                                    # command method should be ran again using that new
+                                    # state
     }
 }
 
@@ -796,39 +1574,45 @@ is $value, 6;
 
 ## Exception Classes
 
-### Sourcing::X::OptmisticLocked
+### Sourcing::X::OptimisticLocked
 
-**Purpose**: Exception thrown when optimistic locking fails.
+**Purpose**: Exception thrown when optimistic locking fails. It means that
+new events appeared for that aggregation between the `^update` call and
+the event emission, indicating concurrent modification.
 
-**Location**: `lib/Sourcing/X/OptmisticLocked.rakumod`
+**Location**: `lib/Sourcing/X/OptimisticLocked.rakumod`
 
 ```raku
-unit class Sourcing::X::OptmisticLocked is Exception;
+unit class Sourcing::X::OptimisticLocked is Exception;
 
-method message { "<sourcing optmitic locked>" }
+method message { "<sourcing optimistic locked: type=$!type.^name, ids={$.ids.raku}, expected-version=$!expected-version, actual-version=$!actual-version>" }
 ```
 
-**Note**: Currently not actively used (marked TODO in code for CAS implementation).
+**Behavior**: When thrown inside a command method, the `is command` trait
+catches it and automatically retries (up to 5 attempts). If all 5 retries
+fail, the **last `X::OptimisticLocked` exception is re-thrown** to the caller.
+Non-command code that catches this exception should call `^update` to refresh
+state before retrying.
 
 ---
 
 ## Index of Files
 
-| File | Purpose |
-|------|---------|
-| `lib/Sourcing.rakumod` | Main module, exports traits, sourcing function |
-| `lib/Sourcing/Projection.rakumod` | Role for all projections |
-| `lib/Sourcing/Aggregation.rakumod` | Role marker for aggregations |
-| `lib/Sourcing/ProjectionId.rakumod` | Role for projection ID attributes |
-| `lib/Sourcing/ProjectionIdMap.rakumod` | Role for method ID mapping |
-| `lib/Sourcing/ProjectionStorage.rakumod` | Registry projection |
-| `lib/Sourcing/Plugin.rakumod` | Abstract plugin interface |
-| `lib/Sourcing/Plugin/Memory.rakumod` | In-memory plugin implementation |
-| `lib/Sourcing/X/OptmisticLocked.rakumod` | Optimistic locking exception |
-| `lib/Metamodel/ProjectionHOW.rakumod` | Metaclass for projections |
-| `lib/Metamodel/AggregationHOW.rakumod` | Metaclass for aggregations |
-| `lib/Metamodel/ProjectionIdContainer.rakumod` | ID introspection role |
-| `lib/Metamodel/EventHandlerContainer.rakumod` | Event handler introspection role |
+| File                                          | Purpose                                        |
+|-----------------------------------------------|------------------------------------------------|
+| `lib/Sourcing.rakumod`                          | Main module, exports traits, sourcing function |
+| `lib/Sourcing/Projection.rakumod`               | Role for all projections                       |
+| `lib/Sourcing/Aggregation.rakumod`              | Role marker for aggregations                   |
+| `lib/Sourcing/ProjectionId.rakumod`             | Role for projection ID attributes              |
+| `lib/Sourcing/ProjectionIdMap.rakumod`          | Role for method ID mapping                     |
+| `lib/Sourcing/ProjectionStorage.rakumod`        | Registry projection                            |
+| `lib/Sourcing/Plugin.rakumod`                   | Abstract plugin interface                      |
+| `lib/Sourcing/Plugin/Memory.rakumod`            | In-memory plugin implementation                |
+| `lib/Sourcing/X/OptimisticLocked.rakumod`        | Optimistic locking exception                   |
+| `lib/Metamodel/ProjectionHOW.rakumod`           | Metaclass for projections                      |
+| `lib/Metamodel/AggregationHOW.rakumod`          | Metaclass for aggregations                     |
+| `lib/Metamodel/ProjectionIdContainer.rakumod`   | ID introspection role                          |
+| `lib/Metamodel/EventHandlerContainer.rakumod`   | Event handler introspection role               |
 
 ---
 
@@ -844,3 +1628,8 @@ method message { "<sourcing optmitic locked>" }
 | `t/07-projection-storage.rakutest` | ProjectionStorage registry, auto-update |
 | `t/08-accounts.rakutest` | Full account aggregate example |
 | `t/09-update.rakutest` | Command methods with auto-update |
+| `t/10-optimistic-locking.rakutest` | Optimistic locking: direct emit, version checking, command retry |
+| `t/11-examples.rakutest` | Example modules (BankAccount, ShoppingCart, TodoList) |
+| `t/12-command-retry.rakutest` | Command retry: happy path, single retry, non-locking exceptions, state correctness |
+| `t/13-projection-read-only.rakutest` | Projection read-only enforcement: projections cannot emit, aggregations can |
+| `t/14-integration.rakutest` | Full CQRS integration: order lifecycle, validation, multiple aggregates, projections |

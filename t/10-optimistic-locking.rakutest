@@ -1,0 +1,213 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+use Sourcing::X::OptimisticLocked;
+
+Sourcing::Plugin::Memory.use;
+
+# Test 1: Direct emit succeeds with correct version
+{
+    class TestEvent1 { has UInt $.id; has Int $.value }
+    
+    aggregation TestAgg1 {
+        has UInt $.id is projection-id;
+        has Int $.value = 0;
+        method apply(TestEvent1 $_) { $!value += .value }
+    }
+    
+    my $memory = $*SourcingConfig;
+    
+    my $event1 = TestEvent1.new(:id(1), :value(100));
+    lives-ok {
+        $memory.emit($event1, :type(TestAgg1), :ids({id => 1}), :current-version(-1))
+    }, "First emit succeeds with version -1";
+    
+    my %cached := $memory.get-cached-data: TestAgg1, {id => 1};
+    is %cached<last-id>, 0, "Version incremented to 0 after emit";
+}
+
+# Test 2: Direct emit fails with wrong version
+{
+    class TestEvent2 { has UInt $.id; has Int $.value }
+    
+    aggregation TestAgg2 {
+        has UInt $.id is projection-id;
+        has Int $.value = 0;
+        method apply(TestEvent2 $_) { $!value += .value }
+    }
+    
+    my $memory = $*SourcingConfig;
+    
+    # First setup - emit to set initial version
+    my $event1 = TestEvent2.new(:id(1), :value(100));
+    $memory.emit($event1, :type(TestAgg2), :ids({id => 1}), :current-version(-1));
+    
+    # Get the current version
+    my %cached := $memory.get-cached-data: TestAgg2, {id => 1};
+    my $current-version = %cached<last-id>;
+    
+    # Now try to emit with wrong version (using stale version)
+    my $event2 = TestEvent2.new(:id(1), :value(50));
+    throws-like {
+        $memory.emit($event2, :type(TestAgg2), :ids({id => 1}), :current-version(-1))
+    }, Sourcing::X::OptimisticLocked,
+        "Emit fails with stale version when concurrent modification occurred";
+    
+    # But with current version it should work
+    lives-ok {
+        my $event3 = TestEvent2.new(:id(1), :value(75));
+        $memory.emit($event3, :type(TestAgg2), :ids({id => 1}), :current-version($current-version))
+    }, "Emit succeeds with fresh version";
+}
+
+# Test 3: Multiple retries eventually succeed when version is refreshed
+{
+    class TestEvent3 { has UInt $.id; has Int $.value }
+    
+    aggregation TestAgg3 {
+        has UInt $.id is projection-id;
+        has Int $.value = 0;
+        method apply(TestEvent3 $_) { $!value += .value }
+    }
+    
+    my $memory = $*SourcingConfig;
+    
+    # Setup initial state
+    my $event1 = TestEvent3.new(:id(1), :value(10));
+    $memory.emit($event1, :type(TestAgg3), :ids({id => 1}), :current-version(-1));
+    
+    # First attempt fails - suppress the exception
+    my $event2 = TestEvent3.new(:id(1), :value(20));
+    try {
+        $memory.emit($event2, :type(TestAgg3), :ids({id => 1}), :current-version(-1));
+    }
+    
+    # Get fresh version
+    my %cached := $memory.get-cached-data: TestAgg3, {id => 1};
+    my $fresh-version = %cached<last-id>;
+    
+    # Now emit with fresh version - should succeed
+    my $event3 = TestEvent3.new(:id(1), :value(30));
+    lives-ok {
+        $memory.emit($event3, :type(TestAgg3), :ids({id => 1}), :current-version($fresh-version))
+    }, "Emit succeeds after version refresh";
+}
+
+# Test 4: Events are stored in the memory plugin
+{
+    my $memory = $*SourcingConfig;
+    my $initial-count = $memory.events.elems;
+    
+    # Use basic emit (without optimistic locking) to store events
+    class SimpleEvent { has UInt $.id; has Str $.data }
+    $memory.emit(SimpleEvent.new(:id(1), :data("first")));
+    $memory.emit(SimpleEvent.new(:id(1), :data("second")));
+    
+    is $memory.events.elems, $initial-count + 2, "Events are stored in memory plugin";
+    is $memory.events[*-2].data, "first", "First event stored correctly";
+    is $memory.events[*-1].data, "second", "Second event stored correctly";
+}
+
+# Test 5: Basic emit works without optimistic locking
+{
+    my $memory = $*SourcingConfig;
+    my $initial-count = $memory.events.elems;
+    
+    # Basic emit without version checking
+    class NoVersionEvent { has Str $.message }
+    $memory.emit(NoVersionEvent.new(:message("test")));
+    
+    is $memory.events.elems, $initial-count + 1, "Basic emit works without optimistic locking";
+    is $memory.events[*-1].message, "test", "Event message is correct";
+}
+
+# Test 6: Command method with ^update - version refresh works
+{
+    class CounterEvent { has UInt $.id; has Int $.delta }
+    my $counter-value = 0;
+    my $memory = $*SourcingConfig;
+    
+    aggregation Counter {
+        has UInt $.id is projection-id;
+        has Int $.count = 0;
+        
+        method apply(CounterEvent $_) {
+            $!count += .delta;
+            $counter-value = $!count;
+        }
+        
+        # Note: Must use :delta($amount) to match the event attribute name
+        method increment(Int $amount) is command {
+            $.counter-event: :delta($amount)
+        }
+    }
+    
+    # Create aggregate using sourcing() which initializes the version in store
+    my $c = sourcing Counter, :id(1);
+    
+    # First command - emit event
+    $c.increment: 10;
+    $c.^update;  # Apply emitted events and update store
+    is $counter-value, 10, "First increment succeeded";
+    
+    # Version is now in the store
+    my %cached := $memory.get-cached-data: Counter, {id => 1};
+    my $v1 = %cached<last-id>;
+    is $v1, 0, "Version is 0 in store after first command";
+    
+    # Simulate concurrent modification using direct emit with version
+    my $concurrent-event = CounterEvent.new(:id(1), :delta(5));
+    $memory.emit($concurrent-event, :type(Counter), :ids({id => 1}), :current-version($v1));
+    
+    # The aggregate doesn't see this yet - it still has stale version
+    is $counter-value, 10, "Before ^update, counter still has old value";
+    
+    # ^update fetches new events and updates version
+    $c.^update;
+    is $counter-value, 15, "After ^update, concurrent modification is visible";
+    
+    # Version in store is now incremented (by the concurrent emit)
+    my %cached2 := $memory.get-cached-data: Counter, {id => 1};
+    my $v2 = %cached2<last-id>;
+    is $v2, 1, "Version is 1 in store after concurrent emit";
+    
+    # New command succeeds with fresh version
+    $c.increment: 30;
+    $c.^update;
+    is $counter-value, 45, "Command succeeds after version refresh";
+}
+
+# Test 7: Command method succeeds when version is fresh (no concurrent modification)
+{
+    class AmountEvent { has UInt $.id; has Int $.amount }
+    my $balance = 0;
+    
+    aggregation Account {
+        has UInt $.id is projection-id;
+        has Int $.balance = 0;
+        
+        method apply(AmountEvent $_) {
+            $!balance += .amount;
+            $balance = $!balance;
+        }
+        
+        # Note: Must use :amount($amount) to match the event attribute name
+        method deposit(Int $amount) is command {
+            $.amount-event: :amount($amount)
+        }
+    }
+    
+    my $a = Account.new: :1id;
+    
+    # First deposit
+    $a.deposit: 100;
+    $a.^update;
+    is $balance, 100, "First deposit succeeded";
+    
+    # Second deposit without interference - should succeed
+    $a.deposit: 50;
+    $a.^update;
+    is $balance, 150, "Second deposit succeeded (no concurrent modification)";
+}
+
+done-testing;

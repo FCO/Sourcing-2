@@ -1,0 +1,161 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+use Sourcing::ProjectionStorage;
+
+Sourcing::Plugin::Memory.use;
+
+# Integration test: Full CQRS flow
+# Command → Aggregate → Event → Projection → Query
+
+class OrderPlaced {
+    has UInt $.order-id;
+    has Str $.customer;
+    has Rat $.total;
+}
+
+class OrderShipped {
+    has UInt $.order-id;
+    has Str $.tracking-number;
+}
+
+class OrderCancelled {
+    has UInt $.order-id;
+    has Str $.reason;
+}
+
+# Projection: Order details view (read model)
+projection OrderDetailsView {
+    has UInt $.order-id is projection-id;
+    has Str $.customer;
+    has Rat $.total = 0.0;
+    has Str $.status = 'pending';
+    has Str $.tracking-number;
+
+    multi method apply(OrderPlaced $e) {
+        $!customer = $e.customer;
+        $!total = $e.total;
+        $!status = 'placed';
+    }
+
+    multi method apply(OrderShipped $e) {
+        $!tracking-number = $e.tracking-number;
+        $!status = 'shipped';
+    }
+
+    multi method apply(OrderCancelled $e) {
+        $!status = 'cancelled';
+    }
+}
+
+# Aggregation: Order (write model)
+aggregation Order {
+    has UInt $.order-id is projection-id;
+    has Str $.status = 'pending';
+    has Rat $.total = 0.0;
+
+    multi method apply(OrderPlaced $e) {
+        $!status = 'placed';
+        $!total = $e.total;
+    }
+
+    multi method apply(OrderShipped $e) {
+        $!status = 'shipped';
+    }
+
+    multi method apply(OrderCancelled $e) {
+        $!status = 'cancelled';
+    }
+
+    method place(Str $customer, Rat $total) is command {
+        die "Order already placed" if $!status ne 'pending';
+        die "Total must be positive" if $total <= 0;
+        $.order-placed: :$customer, :$total;
+    }
+
+    method ship(Str $tracking-number) is command {
+        die "Order not placed" if $!status ne 'placed';
+        $.order-shipped: :$tracking-number;
+    }
+
+    method cancel(Str $reason) is command {
+        die "Order already shipped" if $!status eq 'shipped';
+        $.order-cancelled: :$reason;
+    }
+}
+
+{
+    my $memory = $*SourcingConfig;
+
+    # 1. Place an order via command
+    my $order = sourcing Order, :order-id(1);
+    $order.place: 'Alice', 99.95;
+    $order.^update;
+
+    is $order.status, 'placed', "Order status is 'placed' after command";
+    is $order.total, 99.95, "Order total is set";
+
+    # 2. Query the projection (read model)
+    my $view = sourcing OrderDetailsView, :order-id(1);
+    is $view.customer, 'Alice', "Projection shows customer name";
+    is $view.total, 99.95, "Projection shows order total";
+    is $view.status, 'placed', "Projection shows order status";
+
+    # 3. Ship the order via command
+    $order.ship: 'TRACK-123';
+    $order.^update;
+
+    is $order.status, 'shipped', "Order status is 'shipped' after ship command";
+
+    # 4. Query the updated projection
+    $view = sourcing OrderDetailsView, :order-id(1);
+    is $view.status, 'shipped', "Projection reflects shipped status";
+    is $view.tracking-number, 'TRACK-123', "Projection shows tracking number";
+
+    # 5. Create a second order
+    my $order2 = sourcing Order, :order-id(2);
+    $order2.place: 'Bob', 49.50;
+    $order2.^update;
+
+    is $order2.status, 'placed', "Second order placed";
+
+    # 6. Verify first order is unaffected
+    $order = sourcing Order, :order-id(1);
+    is $order.status, 'shipped', "First order still shipped";
+    is $order.total, 99.95, "First order total unchanged";
+
+    # 7. Verify both projections exist
+    my $view1 = sourcing OrderDetailsView, :order-id(1);
+    my $view2 = sourcing OrderDetailsView, :order-id(2);
+    is $view1.status, 'shipped', "View 1: shipped";
+    is $view2.status, 'placed', "View 2: placed";
+    is $view1.customer, 'Alice', "View 1: Alice";
+    is $view2.customer, 'Bob', "View 2: Bob";
+
+    # 8. Test validation: cannot ship an already shipped order
+    $order = sourcing Order, :order-id(1);
+    throws-like { $order.ship: 'TRACK-456' }, X::AdHoc,
+        "Cannot ship already-shipped order";
+    is $order.status, 'shipped', "Order status unchanged after failed command";
+
+    # 9. Test validation: cannot cancel a shipped order
+    throws-like { $order.cancel: 'changed mind' }, X::AdHoc,
+        "Cannot cancel shipped order";
+    is $order.status, 'shipped', "Order status unchanged after failed cancel";
+
+    # 10. Test validation: cannot place order with negative total
+    my $bad-order = sourcing Order, :order-id(3);
+    throws-like { $bad-order.place: 'Charlie', -10.0 }, X::AdHoc,
+        "Cannot place order with negative total";
+    is $bad-order.status, 'pending', "Order status unchanged after failed place";
+
+    # 11. Cancel the second order
+    $order2.cancel: 'customer request';
+    $order2.^update;
+    is $order2.status, 'cancelled', "Second order cancelled";
+
+    $view2 = sourcing OrderDetailsView, :order-id(2);
+    is $view2.status, 'cancelled', "Projection reflects cancelled status";
+}
+
+done-testing;

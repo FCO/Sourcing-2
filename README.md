@@ -36,7 +36,7 @@ SUBROUTINES
 sub sourcing
 ------------
 
-Creates or retrieves a projection instance, applying any initial events that have occurred since the last cached version.
+Creates a fresh projection/aggregation instance, applying all events from the event store for the given identity.
 
 ### Parameters
 
@@ -46,7 +46,7 @@ Creates or retrieves a projection instance, applying any initial events that hav
 
 ### Returns
 
-A new or cached instance of the projection type with all relevant events applied.
+A new instance of the projection type with all relevant events applied. Each call to `sourcing` creates a fresh instance; it does not return cached instances.
 
 ### Example
 
@@ -62,7 +62,9 @@ Custom traits for marking methods as commands and attributes as projection ident
 
 ### trait_mod:<is>(Method $m, Bool :$command)
 
-Marks a method as a command. When called, the method will first call `^update` on the object to apply any new events before executing the command logic.
+Marks a method as a command. When called, the method is wrapped in a retry loop that:
+
+1. Calls `^update` to reset and replay the aggregate from the event store 2. Executes the command body (validation and event emission) 3. If `Sourcing::X::OptimisticLocked` is thrown during event emission, the loop retries from step 1 (up to 5 attempts total) 4. Non-locking exceptions (e.g., validation errors) are re-thrown immediately without retry 5. After exhausting all 5 attempts, the last `X::OptimisticLocked` exception is re-thrown
 
 ### trait_mod:<is>(Method $m, :$projection-id-map)
 

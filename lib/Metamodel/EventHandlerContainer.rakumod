@@ -15,7 +15,6 @@ unit role Metamodel::EventHandlerContainer;
 
 has $!events-handled-by;
 has $!events-handled-map;
-has $!events-handled-reverse-map;
 
 =begin pod
 

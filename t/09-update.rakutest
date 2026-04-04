@@ -6,7 +6,6 @@ Sourcing::Plugin::Memory.use;
 
 class MyEvent { has $.id; has $.value }
 my $value = 0;
-my $count = 0;
 
 aggregation A {
 	has Int $.id is projection-id;
@@ -14,7 +13,6 @@ aggregation A {
 	method apply(MyEvent $_) {
 		$!value += .value;
 		$value = $!value;
-		$count++
 	}
 	method value-is($is) is command {
 		is $value, $is;
@@ -25,22 +23,18 @@ aggregation A {
 my $a = A.new: :1id;
 
 is $value, 0;
-is $count, 0;
 
 $a.my-event: :1value;
 $a.^update;
 is $value, 1;
-is $count, 1;
 
 $a.my-event: :2value;
 $a.^update;
 is $value, 3;
-is $count, 2;
 
 $a.my-event: :3value;
 $a.^update;
 is $value, 6;
-is $count, 3;
 
 $a.value-is: 6;
 $a.value-is: 12;

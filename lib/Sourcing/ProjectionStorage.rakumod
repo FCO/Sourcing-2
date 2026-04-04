@@ -58,6 +58,11 @@ method start {
 			$s.apply: $event
 		}
 	}
+	my $p = Promise.new;
+	$!supply.tap:
+		done => { $p.keep: 'done' },
+		quit => -> $ex { $p.break: $ex };
+	$p
 }
 
 =begin pod

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CQRS Pattern — Sourcing Documentation</title>
+    <style>
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--text-muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff;--code-bg:#1a1e24;--font-mono:'SF Mono','Fira Code',monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}html{scroll-behavior:smooth}body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.7;font-size:16px}.sidebar{position:fixed;top:0;left:0;width:280px;height:100vh;background:var(--surface);border-right:1px solid var(--border);overflow-y:auto;padding:24px 0;z-index:100}.sidebar-header{padding:0 20px 20px;border-bottom:1px solid var(--border);margin-bottom:16px}.sidebar-header h1{font-size:20px;font-weight:700;color:var(--accent)}.sidebar-header p{font-size:12px;color:var(--text-muted);margin-top:4px}.sidebar-nav{padding:0 12px}.sidebar-nav a{display:block;padding:6px 12px;color:var(--text-muted);text-decoration:none;font-size:14px;border-radius:6px}.sidebar-nav a:hover{color:var(--text);background:rgba(88,166,255,0.08)}.sidebar-nav a.active{color:var(--accent);background:rgba(88,166,255,0.12)}.sidebar-group{margin-bottom:8px}.sidebar-group-title{padding:8px 12px 4px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted)}.main{margin-left:280px;min-height:100vh}.content{max-width:860px;margin:0 auto;padding:48px 40px 80px}h1{font-size:36px;font-weight:800;margin-bottom:16px}h2{font-size:28px;font-weight:700;margin:48px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--border)}h3{font-size:22px;font-weight:600;margin:32px 0 12px}p{margin-bottom:16px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}code{font-family:var(--font-mono);background:var(--code-bg);padding:2px 6px;border-radius:4px;font-size:0.9em}pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:20px;overflow-x:auto;margin:16px 0}pre code{background:none;padding:0;font-size:14px}table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px}th,td{padding:10px 14px;border:1px solid var(--border);text-align:left}th{background:var(--surface);font-weight:600}.callout{border-left:4px solid var(--accent);background:rgba(88,166,255,0.06);padding:16px 20px;border-radius:0 8px 8px 0;margin:20px 0}.callout.warning{border-left-color:var(--orange);background:rgba(210,153,34,0.06)}.callout-title{font-weight:600;font-size:14px;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.03em}.menu-toggle{display:none;position:fixed;top:12px;left:12px;z-index:200;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:18px}@media(max-width:768px){.sidebar{transform:translateX(-100%)}.sidebar.open{transform:translateX(0)}.main{margin-left:0}.menu-toggle{display:block}.content{padding:24px 16px}}
+    </style>
+</head>
+<body>
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
+    <nav class="sidebar">
+        <div class="sidebar-header"><h1>Sourcing</h1><p>Event Sourcing for Raku</p></div>
+        <div class="sidebar-nav">
+            <div class="sidebar-group"><div class="sidebar-group-title">Getting Started</div>
+                <a href="../index.html">Home</a><a href="event-sourcing.html">What is Event Sourcing?</a><a href="cqrs.html" class="active">CQRS Pattern</a><a href="architecture.html">Architecture</a>
+            </div>
+            <div class="sidebar-group"><div class="sidebar-group-title">Core Concepts</div>
+                <a href="projections.html">Projections</a><a href="aggregations.html">Aggregations</a><a href="commands.html">Commands</a><a href="optimistic-locking.html">Optimistic Locking</a><a href="events.html">Events</a>
+            </div>
+            <div class="sidebar-group"><div class="sidebar-group-title">API Reference</div>
+                <a href="../api/sourcing.html">sourcing()</a><a href="../api/projection.html">Sourcing::Projection</a><a href="../api/aggregation.html">Sourcing::Aggregation</a><a href="../api/plugin.html">Sourcing::Plugin</a><a href="../api/memory.html">Sourcing::Plugin::Memory</a><a href="../api/projection-storage.html">ProjectionStorage</a><a href="../api/metaclasses.html">Metaclasses</a><a href="../api/traits.html">Traits</a><a href="../api/exceptions.html">Exceptions</a>
+            </div>
+            <div class="sidebar-group"><div class="sidebar-group-title">Guides</div>
+                <a href="../guides/quick-start.html">Quick Start</a><a href="../guides/bank-account.html">Bank Account Example</a><a href="../guides/shopping-cart.html">Shopping Cart Example</a><a href="../guides/projections.html">Building Projections</a><a href="../guides/plugins.html">Writing a Plugin</a>
+            </div>
+        </div>
+    </nav>
+    <main class="main">
+        <div class="content">
+            <h1>CQRS Pattern</h1>
+            <p><strong>CQRS (Command Query Responsibility Segregation)</strong> separates the write model from the read model. Instead of using the same data structure for both creating/updating data and querying it, CQRS uses different models optimized for each purpose.</p>
+
+            <h2>Why Separate Commands and Queries?</h2>
+            <p>In traditional applications, a single model serves both purposes:</p>
+            <pre><code># Traditional: one model does everything
+class User {
+    has $.id; has $.name; has $.email; has $.last-login;
+
+    method update-email($new-email) { ... }  # Write
+    method get-display-name() { ... }         # Read
+}</code></pre>
+            <p>This creates tension. Writes need <strong>normalization, constraints, and transactional consistency</strong>. Reads need <strong>denormalization, pre-computed aggregates, and query-specific shapes</strong>. Optimizing for one compromises the other.</p>
+
+            <h2>The CQRS Solution</h2>
+            <p>CQRS splits the model into two sides:</p>
+            <table>
+                <tr><th></th><th>Command Side (Write)</th><th>Query Side (Read)</th></tr>
+                <tr><td><strong>Purpose</strong></td><td>Validate &amp; process changes</td><td>Display &amp; query data</td></tr>
+                <tr><td><strong>Optimized for</strong></td><td>Consistency, invariants</td><td>Query performance, flexibility</td></tr>
+                <tr><td><strong>Consistency</strong></td><td>Strong (within boundary)</td><td>Eventually consistent</td></tr>
+                <tr><td><strong>How many</strong></td><td>One per aggregate</td><td>Many, per use case</td></tr>
+                <tr><td><strong>In Sourcing</strong></td><td><a href="aggregations.html">Aggregations</a></td><td><a href="projections.html">Projections</a></td></tr>
+            </table>
+
+            <h2>CQRS + Event Sourcing</h2>
+            <p>When combined with Event Sourcing, CQRS becomes especially powerful:</p>
+            <pre><code>Command arrives → Aggregation validates → Emits event
+                                              ↓
+                                        Event Store
+                                              ↓
+                                    ┌─────────┴─────────┐
+                                    ↓                   ↓
+                              Dashboard View      Analytics View
+                              Projection          Projection</code></pre>
+            <p>The <strong>aggregation</strong> (command side) validates the command against current state and emits an immutable event. The <strong>projections</strong> (query side) listen to the event stream and build their own optimized views.</p>
+
+            <h2>How Sourcing Implements CQRS</h2>
+            <h3>Command Side — Aggregations</h3>
+            <pre><code>aggregation BankAccount {
+    has Int $.account-id is projection-id;
+    has Rat $.balance = 0;
+
+    method apply(AmountDeposited $e) { $!balance += $e.amount }
+    method apply(AmountWithdrawn $e) { $!balance -= $e.amount }
+
+    method withdraw(Rat $amount) is command {
+        die "Insufficient funds" if $!balance &lt; $amount;
+        $.amount-withdrawn: :$amount;
+    }
+}</code></pre>
+            <p>The aggregation enforces the invariant (balance cannot go negative) <em>before</em> emitting any events.</p>
+
+            <h3>Query Side — Projections</h3>
+            <pre><code>projection AccountSummary {
+    has Int $.account-id is projection-id;
+    has Rat $.balance = 0;
+    has Int $.transaction-count = 0;
+
+    method apply(AmountDeposited $e) {
+        $!balance += $e.amount;
+        $!transaction-count++;
+    }
+    method apply(AmountWithdrawn $e) {
+        $!balance -= $e.amount;
+        $!transaction-count++;
+    }
+}</code></pre>
+            <p>The projection builds a read-optimized view. It never validates or emits — it only observes and derives.</p>
+
+            <div class="callout">
+                <div class="callout-title">Key Insight</div>
+                <p>The same event stream feeds both the aggregation (for replay) and all projections. Adding a new projection doesn't require changing the aggregation or the event schema.</p>
+            </div>
+
+            <h2>When to Use CQRS</h2>
+            <p>CQRS adds complexity. Use it when:</p>
+            <ul>
+                <li>You need different read and write models (different data shapes, different performance requirements)</li>
+                <li>You have complex business rules that need strong consistency</li>
+                <li>You need multiple views of the same data (dashboard, reports, API responses)</li>
+                <li>You need an audit trail of all changes</li>
+            </ul>
+            <p>For simple CRUD applications, CQRS is overkill. Start with a single model and introduce CQRS when the tension between read and write requirements becomes painful.</p>
+
+            <h2>Next Steps</h2>
+            <ul>
+                <li>See how the pieces fit together in <a href="architecture.html">Architecture</a></li>
+                <li>Learn about <a href="aggregations.html">Aggregations</a> — the command side</li>
+                <li>Learn about <a href="projections.html">Projections</a> — the query side</li>
+            </ul>
+        </div>
+    </main>
+</body>
+</html>

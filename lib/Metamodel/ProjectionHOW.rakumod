@@ -53,8 +53,16 @@ method compose(Mu $proj, |) {
 
 =head2 method update
 
-Applies any new events that have occurred since the last known version.
-This is called when a command method is invoked on an aggregate.
+Resets and replays the aggregate from the event store:
+1. Creates a fresh instance to obtain default attribute values
+2. Resets all mutable attributes (preserving projection-id attributes)
+3. Fetches all events for the given identity from the store (starting from version -1)
+4. Applies each event via $proj.apply: $event
+5. Updates $!__current-version__ to total events applied minus one
+6. Stores updated cached data via $*SourcingConfig.store-cached-data
+
+This ensures the aggregate always reflects a clean, current snapshot
+of the event stream, with no stale state from previous operations.
 
 =head3 Parameters
 
@@ -62,20 +70,29 @@ This is called when a command method is invoked on an aggregate.
 
 =head3 Returns
 
-The new version ID after applying events.
+The new version ID after replaying all events.
 
 =end pod
 
 method update($proj) {
 	my %ids = $proj.^projection-id-pairs;
+
+	my $fresh = $proj.WHAT.new: |%ids;
+	my $proj-ids = $proj.^projection-ids.map(*.name).Set;
+	for $proj.^attributes.grep({ !$proj-ids{.name} && .name ne '$!__current-version__' && .has_accessor }) -> $attr {
+		$attr.set_value: $proj, $attr.get_value($fresh);
+	}
+
 	my $attr    = $proj.^attributes.first: *.name eq '$!__current-version__';
-	my $last-id = $attr.get_value($proj) // -1;
 
 	my %map{Mu:U} = $proj.^handled-events-map;
-	my @initial-events = $*SourcingConfig.get-events-after: $last-id, %ids, %map;
+	my @initial-events = $*SourcingConfig.get-events-after: -1, %ids, %map;
 
 	$proj.apply: $_ for @initial-events;
 
-	$attr.set_value: $proj, my $new-id = $last-id + @initial-events;
+	$attr.set_value: $proj, my $new-id = @initial-events.elems - 1;
+
+	$*SourcingConfig.store-cached-data: $proj, :last-id($new-id);
+
 	$new-id
 }

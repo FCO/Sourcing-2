@@ -43,7 +43,7 @@ zef install App::Mi6
 
 ```raku
 use Sourcing::Projection;      # External module
-use Sourcing::X::OptmisticLocked;  # Custom exception
+use Sourcing::X::OptimisticLocked;  # Custom exception
 use v6.e.PREVIEW;               # Language version (when needed)
 ```
 
@@ -106,8 +106,8 @@ multi trait_mod:<is>(Method $m, Bool :$command where *.so) is export { ... }
 - Inherit from `Exception`
 
 ```raku
-unit class Sourcing::X::OptmisticLocked is Exception;
-method message { "<sourcing optmitic locked>" }
+unit class Sourcing::X::OptimisticLocked is Exception;
+method message { "<sourcing optimistic locked>" }
 ```
 
 - Use `die` for fatal errors with descriptive messages
@@ -141,7 +141,7 @@ lib/
 │   ├── Aggregation.rakumod      # Role
 │   ├── ProjectionStorage.rakumod
 │   └── X/
-│       └── OptmisticLocked.rakumod
+│       └── OptimisticLocked.rakumod
 └── Metamodel/
     ├── ProjectionHOW.rakumod
     └── ...

@@ -1,0 +1,144 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+use Sourcing::X::OptimisticLocked;
+
+Sourcing::Plugin::Memory.use;
+
+# Test 1: Command succeeds on first attempt (no contention)
+{
+    class HappyEvent { has UInt $.id; has Int $.delta }
+    my $counter-value = 0;
+
+    aggregation HappyCounter {
+        has UInt $.id is projection-id;
+        has Int $.count = 0;
+
+        method apply(HappyEvent $_) {
+            $!count += .delta;
+            $counter-value = $!count;
+        }
+
+        method increment(Int $amount) is command {
+            $.happy-event: :delta($amount)
+        }
+    }
+
+    my $c = sourcing HappyCounter, :id(1);
+
+    lives-ok { $c.increment: 15 }, "Command succeeds with no contention";
+    $c.^update;
+    is $counter-value, 15, "Counter reflects the increment";
+}
+
+# Test 2: Command retries once after optimistic lock failure
+{
+    class RetryOnceEvent { has UInt $.id; has Int $.delta }
+    my $counter-value = 0;
+    my $cmd-exec-count = 0;
+    my $inject-conflict = True;
+
+    aggregation RetryOnceCounter {
+        has UInt $.id is projection-id;
+        has Int $.count = 0;
+
+        method apply(RetryOnceEvent $_) {
+            $!count += .delta;
+            $counter-value = $!count;
+        }
+
+        method increment(Int $amount) is command {
+            $cmd-exec-count++;
+
+            if $inject-conflict {
+                my $memory = $*SourcingConfig;
+                my $concurrent = RetryOnceEvent.new(:id(2), :delta(99));
+                $memory.emit($concurrent, :type(RetryOnceCounter), :ids({id => 2}), :current-version(-1));
+                $inject-conflict = False;
+            }
+
+            $.retry-once-event: :delta($amount)
+        }
+    }
+
+    my $c = sourcing RetryOnceCounter, :id(2);
+
+    lives-ok { $c.increment: 5 }, "Command succeeds after one retry";
+    $c.^update;
+    is $cmd-exec-count, 2, "Command body executed twice (first attempt + retry)";
+    is $counter-value, 104, "Counter reflects concurrent event (99) + command event (5)";
+}
+
+# Test 3: Non-locking exception propagates immediately without retry
+{
+    class X::BadAmount is Exception {
+        method message { "Amount must be positive" }
+    }
+
+    class NoRetryEvent { has UInt $.id; has Int $.delta }
+    my $counter-value = 0;
+    my $cmd-exec-count = 0;
+
+    aggregation NoRetryCounter {
+        has UInt $.id is projection-id;
+        has Int $.count = 0;
+
+        method apply(NoRetryEvent $_) {
+            $!count += .delta;
+            $counter-value = $!count;
+        }
+
+        method add(Int $amount) is command {
+            $cmd-exec-count++;
+            die X::BadAmount.new if $amount <= 0;
+            $.no-retry-event: :delta($amount)
+        }
+    }
+
+    my $c = sourcing NoRetryCounter, :id(3);
+
+    throws-like { $c.add: -5 }, X::BadAmount,
+        "Non-locking exception propagates immediately";
+    is $cmd-exec-count, 1, "Command body executed exactly once (no retry)";
+    is $counter-value, 0, "Counter unchanged after validation error";
+}
+
+# Test 4: Command state is correct after retry
+{
+    class StateCheckEvent { has UInt $.id; has Int $.delta }
+    my $counter-value = 0;
+    my $seen-value;
+    my $inject-conflict = True;
+
+    aggregation StateCheckCounter {
+        has UInt $.id is projection-id;
+        has Int $.count = 0;
+
+        method apply(StateCheckEvent $_) {
+            $!count += .delta;
+            $counter-value = $!count;
+        }
+
+        method increment(Int $amount) is command {
+            $seen-value = $!count;
+
+            if $inject-conflict {
+                my $memory = $*SourcingConfig;
+                my $concurrent = StateCheckEvent.new(:id(5), :delta(50));
+                $memory.emit($concurrent, :type(StateCheckCounter), :ids({id => 5}), :current-version(-1));
+                $inject-conflict = False;
+            }
+
+            $.state-check-event: :delta($amount)
+        }
+    }
+
+    my $c = sourcing StateCheckCounter, :id(5);
+
+    lives-ok { $c.increment: 20 }, "Command succeeds after retry";
+    $c.^update;
+    is $seen-value, 50, "Command saw correct state (50 from concurrent event) on retry";
+    is $counter-value, 70, "Counter reflects all events (50 + 20)";
+}
+
+done-testing;

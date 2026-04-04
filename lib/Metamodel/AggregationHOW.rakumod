@@ -37,8 +37,8 @@ role and generates command methods for each handled event type.
 =end pod
 
 method compose(Mu $aggregation, |) {
-	callsame;
 	$aggregation.^add_role: Sourcing::Aggregation;
+	callsame;
 	for $aggregation.^handled-events-map.kv -> Mu:U $event, %map {
 		my $method-name = lc S:g/(\w)<?before <[A..Z]>>/$0-/ given $event.^name;
 		$method-name .= subst: /'::'/, "-", :g;
@@ -50,10 +50,17 @@ method compose(Mu $aggregation, |) {
 				|c
 			;
 			my $curr-version-attr = $.^attributes.first: *.name eq '$!__current-version__';
-			my $current-version = $curr-version-attr.get_value: self;
+			my $current-version = $curr-version-attr.get_value(SELF) // -1;
 
-			$*SourcingConfig.emit: $new-event, :$current-version
-				if $*SourcingConfig && !$*SourcingReplay;
+			my %ids = $aggregation.HOW.projection-id-pairs(SELF);
+
+			if $*SourcingConfig && !$*SourcingReplay {
+				$*SourcingConfig.emit: $new-event,
+					:type(SELF.WHAT),
+					:ids(%ids),
+					:$current-version;
+				$curr-version-attr.set_value: SELF, $current-version + 1;
+			}
 
 			return $new-event
 		}

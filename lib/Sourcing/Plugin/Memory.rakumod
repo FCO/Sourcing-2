@@ -1,4 +1,7 @@
+use Metamodel::AggregationHOW;
+use Sourcing::Aggregation;
 use Sourcing::Plugin;
+use Sourcing::X::OptimisticLocked;
 
 =begin pod
 
@@ -13,7 +16,7 @@ and testing. Events are stored in memory and a supply emits them in order.
 
 =end pod
 
-# use Sourcing::X::OptmisticLocked;
+# use Sourcing::X::OptimisticLocked;
 unit class Sourcing::Plugin::Memory;
 also does Sourcing::Plugin;
 
@@ -72,13 +75,28 @@ version before emitting to detect concurrent modifications.
 
 =end pod
 
-# TODO: Make use of cas
 multi method emit($event, :$type, :%ids!, :$current-version!) {
-	my :(atomicint :$last-id!, |) := $.get-cached-data: $type.WHAT, %ids;
-	# my :(atomicint :$last-id! is rw, |) := $.get-cached-data: $type.WHAT, %ids;
-	# unless cas $last-id, $current-version, $current-version + 1 {
-	# 	Sourcing::X::OptmisticLocked.new.throw
-	# }
+	unless $type ~~ Sourcing::Aggregation {
+		die "Only aggregations can emit events. Projections are read-only.";
+	}
+	my $key = $type.WHAT.^name;
+	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
+	my $store := %!store{$key};
+	$store{$id-key}:exists || ($store{$id-key} = Hash.new);
+	my atomicint $last-id = -1;
+	$store{$id-key}<last-id> //= $last-id;
+	my $current = $store{$id-key}<last-id>;
+	my $new-version = $current-version + 1;
+	my $old-value = cas($current, $current-version, $new-version);
+	unless $old-value == $current-version {
+		Sourcing::X::OptimisticLocked.new(
+			:type($type),
+			:ids(%ids),
+			:expected-version($current-version),
+			:actual-version($old-value)
+		).throw
+	}
+	$store{$id-key}<last-id> = $new-version;
 	$.emit: $event
 }
 
@@ -193,7 +211,6 @@ Stores projection state using the projection's built-in serialization method.
 
 =end pod
 
-# TODO: Make use of cas
 multi method store-cached-data($proj where *.HOW.^can("data-to-store"), UInt :$last-id!) {
 	$.store-cached-data: $proj, $proj.^projection-id-pairs, $proj.^data-to-store, :$last-id
 }
@@ -212,7 +229,6 @@ Stores projection state by extracting attribute values from the instance.
 
 =end pod
 
-# TODO: Make use of cas
 multi method store-cached-data($proj, Int :$last-id!) {
 	my %data = do for $proj.^attributes.grep({ .has_accessor }) -> $attr {
 		$attr.name.substr(2) => $attr.get_value: $proj
@@ -238,10 +254,11 @@ Low-level method to store projection data under a specific key.
 
 =end pod
 
-# TODO: Make use of cas
 multi method store-cached-data(Mu:U $proj, %ids, %data, Int :$last-id!) {
-	my %final := Map.new: (data => %data, last-id => $last-id);
-	%!store{$proj.^name} := Map.new: (|(%!store{$proj.^name} // %()), $%ids => %final)
+	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
+	%!store{$proj.^name}:exists || (%!store{$proj.^name} = Hash.new);
+	%!store{$proj.^name}{$id-key}<data> = %data;
+	%!store{$proj.^name}{$id-key}<last-id> = $last-id;
 }
 
 =begin pod
@@ -263,6 +280,11 @@ A hash containing C<last-id> and C<data> for the projection.
 =end pod
 
 method get-cached-data(Mu:U $proj, %ids) is rw {
+	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
+	%!store{$proj.^name}:exists || (%!store{$proj.^name} = Hash.new);
+	%!store{$proj.^name}{$id-key}:exists || (%!store{$proj.^name}{$id-key} = Hash.new);
 	my atomicint $last-id = -1;
-	%!store{$proj.^name}{$%ids} // { :$last-id, data => %() };
+	%!store{$proj.^name}{$id-key}<last-id> //= $last-id;
+	%!store{$proj.^name}{$id-key}<data> //= %();
+	%!store{$proj.^name}{$id-key}
 }

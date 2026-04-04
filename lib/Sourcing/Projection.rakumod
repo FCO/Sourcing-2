@@ -40,6 +40,7 @@ multi method new(:@initial-events!, |c) {
 	my $obj = self.bless: |c;
 	for @initial-events -> $event {
 		$obj.apply: $_ with $event;
+		CATCH { default { warn "Failed to apply $event.^name to {self.^name}: $_" } }
 	}
 	$obj
 }

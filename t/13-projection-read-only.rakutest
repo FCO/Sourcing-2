@@ -1,0 +1,62 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+
+Sourcing::Plugin::Memory.use;
+
+# Test: Projection cannot emit events
+{
+    class ReadOnlyEvent { has UInt $.id; has Int $.value }
+
+    projection ReadOnlyProjection {
+        has UInt $.id is projection-id;
+        has Int $.value = 0;
+
+        method apply(ReadOnlyEvent $_) {
+            $!value += .value;
+        }
+    }
+
+    my $p = sourcing ReadOnlyProjection, :id(1);
+
+    throws-like {
+        $*SourcingConfig.emit(
+            ReadOnlyEvent.new(:id(1), :value(10)),
+            :type(ReadOnlyProjection),
+            :ids({id => 1}),
+            :current-version(-1)
+        )
+    }, X::AdHoc,
+        "Projection cannot emit events";
+}
+
+# Test: Aggregation can emit events
+{
+    class WritableEvent { has UInt $.id; has Int $.value }
+
+    aggregation WritableAggregation {
+        has UInt $.id is projection-id;
+        has Int $.value = 0;
+
+        method apply(WritableEvent $_) {
+            $!value += .value;
+        }
+
+        method set-value(Int $v) is command {
+            $.writable-event: :value($v)
+        }
+    }
+
+    my $a = sourcing WritableAggregation, :id(1);
+
+    lives-ok {
+        $*SourcingConfig.emit(
+            WritableEvent.new(:id(1), :value(42)),
+            :type(WritableAggregation),
+            :ids({id => 1}),
+            :current-version(-1)
+        )
+    }, "Aggregation can emit events";
+}
+
+done-testing;
