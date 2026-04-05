@@ -96,7 +96,7 @@ multi method emit($event, :$type, :%ids!, :$current-version!) {
 			:actual-version($old-value)
 		).throw
 	}
-	# $store{$id-key}<last-id> = $new-version;
+	$store{$id-key}<last-id> = $new-version;
 	$.emit: $event
 }
 
