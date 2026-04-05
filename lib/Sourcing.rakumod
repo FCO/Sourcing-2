@@ -12,6 +12,10 @@ Sourcing is a Raku event sourcing library that provides projections and aggregat
 for building event-driven applications. It uses metaclasses for projections and
 aggregations, with roles for composition.
 
+For full documentation, see L<https://fco.github.io/Sourcing-2/>.
+
+Source code: L<https://github.com/FCO/Sourcing-2>
+
 =head1 SYNOPSIS
 
     use Sourcing;

@@ -1,7 +1,5 @@
 [![Actions Status](https://github.com/FCO/Sourcing-2/actions/workflows/test.yml/badge.svg)](https://github.com/FCO/Sourcing-2/actions)
 
-[Documentation](https://fco.github.io/Sourcing-2/)
-
 NAME
 ====
 
@@ -11,6 +9,10 @@ DESCRIPTION
 ===========
 
 Sourcing is a Raku event sourcing library that provides projections and aggregations for building event-driven applications. It uses metaclasses for projections and aggregations, with roles for composition.
+
+For full documentation, see [https://fco.github.io/Sourcing-2/](https://fco.github.io/Sourcing-2/).
+
+Source code: [https://github.com/FCO/Sourcing-2](https://github.com/FCO/Sourcing-2)
 
 SYNOPSIS
 ========
