@@ -1,5 +1,7 @@
 [![Actions Status](https://github.com/FCO/Sourcing-2/actions/workflows/test.yml/badge.svg)](https://github.com/FCO/Sourcing-2/actions)
 
+[Documentation](https://fco.github.io/Sourcing-2/)
+
 NAME
 ====
 
