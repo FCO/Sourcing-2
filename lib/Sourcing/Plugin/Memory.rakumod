@@ -85,7 +85,7 @@ multi method emit($event, :$type, :%ids!, :$current-version!) {
 	$store{$id-key}:exists || ($store{$id-key} = Hash.new);
 	my atomicint $last-id = -1;
 	$store{$id-key}<last-id> //= $last-id;
-	my $current = $store{$id-key}<last-id>;
+	my $current := $store{$id-key}<last-id>;
 	my $new-version = $current-version + 1;
 	my $old-value = cas($current, $current-version, $new-version);
 	unless $old-value == $current-version {
@@ -96,7 +96,7 @@ multi method emit($event, :$type, :%ids!, :$current-version!) {
 			:actual-version($old-value)
 		).throw
 	}
-	$store{$id-key}<last-id> = $new-version;
+	# $store{$id-key}<last-id> = $new-version;
 	$.emit: $event
 }
 
