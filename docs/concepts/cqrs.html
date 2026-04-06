@@ -42,7 +42,7 @@
                 <a href="../index.html">Home</a><a href="event-sourcing.html">What is Event Sourcing?</a><a href="cqrs.html" class="active">CQRS Pattern</a><a href="architecture.html">Architecture</a>
             </div>
             <div class="sidebar-group"><div class="sidebar-group-title">Core Concepts</div>
-                <a href="projections.html">Projections</a><a href="aggregations.html">Aggregations</a><a href="commands.html">Commands</a><a href="optimistic-locking.html">Optimistic Locking</a><a href="events.html">Events</a>
+                <a href="projections.html">Projections</a><a href="aggregations.html">Aggregations</a><a href="saga.html">Sagas</a><a href="commands.html">Commands</a><a href="optimistic-locking.html">Optimistic Locking</a><a href="events.html">Events</a>
             </div>
             <div class="sidebar-group"><div class="sidebar-group-title">API Reference</div>
                 <a href="../api/sourcing.html">sourcing()</a><a href="../api/projection.html">Sourcing::Projection</a><a href="../api/aggregation.html">Sourcing::Aggregation</a><a href="../api/saga.html">Sourcing::Saga</a><a href="../api/plugin.html">Sourcing::Plugin</a><a href="../api/memory.html">Sourcing::Plugin::Memory</a><a href="../api/projection-storage.html">ProjectionStorage</a><a href="../api/metaclasses.html">Metaclasses</a><a href="../api/traits.html">Traits</a><a href="../api/exceptions.html">Exceptions</a>
@@ -85,24 +85,24 @@ class User {
 flowchart TD
     subgraph CommandSide["COMMAND SIDE (C)"]
         CMD[Command]
-        AGG[Aggregation<br/>consistency<br/>boundary<br/><br/>• Validates<br/>• Emits events<br/>• Enforces<br/>  invariants]
+        AGG[Aggregation]
     end
 
     subgraph EventStore["Event Store (Plugin)"]
-        ES[append-only log<br/>of immutable facts]
+        ES[append-only log]
     end
 
     subgraph QuerySide["QUERY SIDE (Q)"]
-        PS[Projection Storage<br/>(registry)]
-        PROJ[Projections<br/>(read models)<br/><br/>• Dashboard view<br/>• Analytics view<br/>• Fraud detection<br/>• Audit log]
+        PS[Projection Storage]
+        PROJ[Projections]
     end
 
-    QUERY[Queries read from projections<br/>(never from the event store directly)]
+    QUERY[Queries read from projections]
 
-    CMD -->|validates| AGG
-    AGG -->|emit(event)| ES
-    ES -->|Supply (stream)| PS
-    PS -->|routes events| PROJ
+    CMD -->|"validates"| AGG
+    AGG -->|"emit event"| ES
+    ES -->|"Supply stream"| PS
+    PS -->|"routes events"| PROJ
     PROJ --> QUERY
             </div>
             <p>The <strong>aggregation</strong> (command side) validates the command against current state and emits an immutable event. The <strong>projections</strong> (query side) listen to the event stream and build their own optimized views.</p>

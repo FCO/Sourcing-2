@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sagas — Sourcing Documentation</title>
+    <style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--text-muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff;--code-bg:#1a1e24;--font-mono:'SF Mono','Fira Code',monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}html{scroll-behavior:smooth}body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.7;font-size:16px}.sidebar{position:fixed;top:0;left:0;width:280px;height:100vh;background:var(--surface);border-right:1px solid var(--border);overflow-y:auto;padding:24px 0;z-index:100}.sidebar-header{padding:0 20px 20px;border-bottom:1px solid var(--border);margin-bottom:16px}.sidebar-header h1{font-size:20px;font-weight:700;color:var(--accent)}.sidebar-header p{font-size:12px;color:var(--text-muted);margin-top:4px}.sidebar-nav{padding:0 12px}.sidebar-nav a{display:block;padding:6px 12px;color:var(--text-muted);text-decoration:none;font-size:14px;border-radius:6px}.sidebar-nav a:hover{color:var(--text);background:rgba(88,166,255,0.08)}.sidebar-nav a.active{color:var(--accent);background:rgba(88,166,255,0.12)}.sidebar-group{margin-bottom:8px}.sidebar-group-title{padding:8px 12px 4px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted)}.main{margin-left:280px;min-height:100vh}.content{max-width:860px;margin:0 auto;padding:48px 40px 80px}h1{font-size:36px;font-weight:800;margin-bottom:16px}h2{font-size:28px;font-weight:700;margin:48px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--border)}h3{font-size:22px;font-weight:600;margin:32px 0 12px}p{margin-bottom:16px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}code{font-family:var(--font-mono);background:var(--code-bg);padding:2px 6px;border-radius:4px;font-size:0.9em}pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:20px;overflow-x:auto;margin:16px 0;line-height:1.5}pre code{background:none;padding:0;font-size:14px}table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px}th,td{padding:10px 14px;border:1px solid var(--border);text-align:left}th{background:var(--surface);font-weight:600}ul,ol{margin:16px 0;padding-left:24px}li{margin-bottom:8px}.callout{border-left:4px solid var(--accent);background:rgba(88,166,255,0.06);padding:16px 20px;border-radius:0 8px 8px 0;margin:20px 0}.callout.warning{border-left-color:var(--orange);background:rgba(210,153,34,0.06)}.callout.danger{border-left-color:var(--red);background:rgba(248,81,73,0.06)}.callout.success{border-left-color:var(--green);background:rgba(63,185,80,0.06)}.callout-title{font-weight:600;font-size:14px;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.03em}.menu-toggle{display:none;position:fixed;top:12px;left:12px;z-index:200;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:18px}@media (max-width:768px){.sidebar{transform:translateX(-100%)}.sidebar.open{transform:translateX(0)}.main{margin-left:0}.menu-toggle{display:block}.content{padding:24px 16px}}</style>
+</head>
+<body>
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
+    <nav class="sidebar">
+        <div class="sidebar-header"><h1>Sourcing</h1><p>Event Sourcing for Raku</p><p style="margin-top:8px"><a href="https://github.com/FCO/Sourcing-2" style="color:var(--text-muted);font-size:12px">GitHub Repo</a></p></div>
+        <div class="sidebar-nav">
+            <div class="sidebar-group"><div class="sidebar-group-title">Getting Started</div>
+                <a href="../index.html">Home</a><a href="event-sourcing.html">What is Event Sourcing?</a><a href="cqrs.html">CQRS Pattern</a><a href="architecture.html">Architecture</a>
+            </div>
+            <div class="sidebar-group"><div class="sidebar-group-title">Core Concepts</div>
+                <a href="projections.html">Projections</a><a href="aggregations.html">Aggregations</a><a href="saga.html" class="active">Sagas</a><a href="commands.html">Commands</a><a href="optimistic-locking.html">Optimistic Locking</a><a href="events.html">Events</a>
+            </div>
+            <div class="sidebar-group"><div class="sidebar-group-title">API Reference</div>
+                <a href="../api/sourcing.html">sourcing()</a><a href="../api/projection.html">Sourcing::Projection</a><a href="../api/aggregation.html">Sourcing::Aggregation</a><a href="../api/saga.html">Sourcing::Saga</a><a href="../api/plugin.html">Sourcing::Plugin</a><a href="../api/memory.html">Sourcing::Plugin::Memory</a><a href="../api/projection-storage.html">ProjectionStorage</a><a href="../api/metaclasses.html">Metaclasses</a><a href="../api/traits.html">Traits</a><a href="../api/exceptions.html">Exceptions</a>
+            </div>
+            <div class="sidebar-group"><div class="sidebar-group-title">Guides</div>
+                <a href="../guides/quick-start.html">Quick Start</a><a href="../guides/bank-account.html">Bank Account Example</a><a href="../guides/shopping-cart.html">Shopping Cart Example</a><a href="../guides/projections.html">Building Projections</a><a href="../guides/plugins.html">Writing a Plugin</a>
+            </div>
+        </div>
+    </nav>
+    <main class="main">
+        <div class="content">
+            <h1>Sagas</h1>
+            <p>A <strong>saga</strong> is a long-running business process that coordinates commands across multiple aggregations. Unlike an aggregation (which is a single consistency boundary), a saga spans multiple aggregations and manages the workflow between them using the Saga pattern.</p>
+
+            <h2>What Sagas Are</h2>
+            <p>Sagas are the solution to a fundamental distributed systems problem: <strong>how do you maintain consistency across multiple services when atomic transactions aren't available?</strong></p>
+            <ul>
+                <li>They coordinate <strong>multiple aggregations</strong> in a single business workflow</li>
+                <li>They maintain a <strong>state machine</strong> that tracks progress through the process</li>
+                <li>They implement <strong>compensation</strong> — if any step fails, previously completed steps are rolled back</li>
+                <li>They support <strong>timeouts</strong> for long-running processes that might stall</li>
+            </ul>
+
+            <h2>Why Use Sagas</h2>
+            <p>In traditional monolithic applications, you could wrap multiple changes in a single database transaction. In distributed systems, this isn't possible — each service owns its data. The Saga pattern provides an alternative:</p>
+            <table>
+                <tr><th>Approach</th><th>Description</th><th>Trade-off</th></tr>
+                <tr><td><strong>Distributed Transactions</strong></td><td>Two-phase commit across services</td><td>Requires all services to support it; can block indefinitely</td></tr>
+                <tr><td><strong>Saga Pattern</strong></td><td>Sequential local transactions with compensation</td><td>Eventual consistency; compensation must be designed up-front</td></tr>
+            </table>
+            <p>Sagas are ideal for:</p>
+            <ul>
+                <li><strong>Order processing</strong> — Validate payment, reserve inventory, schedule shipping</li>
+                <li><strong>Account transfers</strong> — Withdraw from source, deposit to destination</li>
+                <li><strong>Onboarding flows</strong> — Create user, send welcome email, provision resources</li>
+                <li><strong>Any multi-step business process</strong> that spans service boundaries</li>
+            </ul>
+
+            <h2>Declaring a Saga</h2>
+            <p>Use the <code>saga</code> keyword to declare a saga class. Sagas are built on top of aggregations, so they inherit all aggregation capabilities plus additional saga-specific features:</p>
+            <pre><code>use Sourcing;
+
+saga OrderSaga {
+    has Str $.saga-id is projection-id;
+    has Str $.state = 'pending';
+    has Int $.order-id;
+    has Int $.customer-id;
+
+    multi method apply(OrderRequested $e --> 'creating') {
+        $!order-id = $e.order-id;
+        $!customer-id = $e.customer-id;
+    }
+
+    multi method apply(OrderCompleted $e --> 'completed') { }
+
+    method cancel-order() is command {
+        self.register-compensation: OrderCancelled.new(:$!order-id);
+    }
+
+    method handle-timeout() {
+        self.rollback;
+        $!state = 'cancelled';
+    }
+}</code></pre>
+
+            <h2>State Machine</h2>
+            <p>Sagas use a declarative state machine. Each <code>apply</code> method declares its resulting state using the return type syntax <code>--> 'state-name'</code>:</p>
+            <pre><code>multi method apply(OrderPlaced $e --> 'processing') {
+    $!order-id = $e.order-id;
+    'processing'  # State transitions to 'processing'
+}
+
+multi method apply(PaymentConfirmed $e --> 'ready-to-ship') { } # State transitions to 'ready-to-ship'
+</code></pre>
+            <p>The saga automatically tracks the current state in <code>$.state</code>. You can also guard command methods to specific states using the <code>is on-state</code> trait:</p>
+            <pre><code>method ship-order() is on-state('ready-to-ship') is command {
+    $.order-shipped: :tracking(self.generate-tracking);
+}</code></pre>
+
+            <h2>Compensation and Rollback</h2>
+            <p>When a step succeeds, register a compensation event that can undo it if a later step fails:</p>
+            <pre><code>multi method apply(PaymentProcessed $e --> 'paying') {
+    # Store the compensation immediately after the action succeeds
+    self.register-compensation: PaymentRefunded.new(
+        :order-id($!order-id),
+        :amount($e.amount)
+    );
+
+    # Continue to next step
+    self.send-command: Inventory, { :order-id($!order-id) }, InventoryReserved.new;
+}</code></pre>
+            <p>If any exception occurs, the saga automatically:</p>
+            <ol>
+                <li>Emits all registered compensations in <strong>LIFO order</strong> (last-in, first-out)</li>
+                <li>Clears the compensation stack</li>
+                <li>Transitions to the <code>'failed'</code> state</li>
+            </ol>
+            <pre><code>method rollback() is command {
+    # Automatically called on any unhandled exception
+    # Emits compensations in reverse order of registration
+}</code></pre>
+
+            <div class="callout warning">
+                <div class="callout-title">Compensation Design</div>
+                <p>Always register compensation events <em>immediately after</em> a step succeeds. Don't wait — if an exception happens before you register, there's no way to undo that step!</p>
+            </div>
+
+            <h2>Timeout Handling</h2>
+            <p>Long-running processes need timeouts to handle failure scenarios like a service going down. Sagas support scheduled timeouts:</p>
+            <pre><code>multi method apply(OrderPlaced $e --> 'waiting-payment') {
+    # Schedule a timeout to cancel if payment isn't received
+    self.timeout-in: 'cancel-if-no-payment', :5minutes;
+}
+
+method cancel-if-no-payment() {
+    self.rollback;
+    $!state = 'cancelled';
+}</code></pre>
+            <p>The timeout methods are:</p>
+            <table>
+                <tr><th>Method</th><th>Purpose</th></tr>
+                <tr><td><code>timeout-in($name, :5minutes)</code></td><td>Schedule a timeout from within apply()</td></tr>
+                <tr><td><code>cancel-timeout($name)</code></td><td>Cancel a previously scheduled timeout</td></tr>
+                <tr><td><code>verify-timeouts()</code></td><td>Check and fire expired timeouts (call periodically)</td></tr>
+            </table>
+
+            <div class="callout">
+                <div class="callout-title">External Scheduler Required</div>
+                <p>Sagas don't run their own timers. Your application must periodically call <code>verify-timeouts()</code> on active sagas (e.g., every 10 seconds via a cron job or background worker).</p>
+            </div>
+
+            <h2>Saga-Aggregate Coordination</h2>
+            <p>Sagas can send commands to and bind aggregations for coordinated workflows:</p>
+            <h3>send-command</h3>
+            <p>Send a command directly to an aggregate:</p>
+            <pre><code>method apply(OrderPlaced $e --> 'authorizing') {
+    # Send payment command to the Payment aggregate
+    self.send-command: Payment, { :order-id($!order-id) }, AuthorizePayment.new(:amount($e.amount));
+}</code></pre>
+
+            <h3>bind-aggregate</h3>
+            <p>Bind an aggregation attribute to the saga for lazy loading:</p>
+            <pre><code>saga AccountTransfer {
+    has Account $.from-account;
+    has Account $.to-account;
+
+    multi method apply(TransferStarted $e --> 'withdrawing') {
+        $!from-account = self.bind-aggregate: 'from-account', Account, :id($e.from-id);
+        $!to-account   = self.bind-aggregate: 'to-account', Account, :id($e.to-id);
+    }
+}</code></pre>
+
+            <h2>Saga Design Rules</h2>
+            <ul>
+                <li><strong>Design compensation first.</strong> For every step, ask: "if this fails later, how do we undo it?"</li>
+                <li><strong>Register compensation immediately.</strong> After each successful step, register its compensation before proceeding.</li>
+                <li><strong>Keep sagas idempotent.</strong> Target aggregations should handle repeated commands gracefully.</li>
+                <li><strong>Use timeouts for critical paths.</strong> If a step takes too long, assume it failed and compensate.</li>
+                <li><strong>Name states after user-facing outcomes.</strong> <code>'completed'</code>, <code>'cancelled'</code>, <code>'failed'</code></li>
+            </ul>
+
+            <h2>Example: Order Creation Saga</h2>
+            <pre><code>use Sourcing;
+
+# Events
+class OrderRequested    { has $.saga-id; has $.customer-id; has $.total }
+class PaymentAuthorized { has $.saga-id; has $.payment-id }
+class InventoryReserved { has $.saga-id; has $.reservation-id }
+class OrderShipped      { has $.saga-id; has $.tracking-number }
+class OrderCompleted    { has $.saga-id }
+
+# Sagas
+saga CreateOrder {
+    has Str     $.saga-id is projection-id;
+    has Str     $.state = 'pending';
+
+    multi method apply(OrderRequested $e --> 'authorizing') {
+        self.send-command: Payment, { :saga-id($!saga-id) }, Authorize.new(:amount($e.total));
+        self.timeout-in: 'payment-timeout', :1minute;
+    }
+
+    multi method apply(PaymentAuthorized $e --> 'reserving') {
+        self.cancel-timeout: 'payment-timeout';
+        self.send-command: Inventory, { :saga-id($!saga-id) }, Reserve.new(:items($e.items));
+        self.register-compensation: RefundPayment.new(:payment-id($e.payment-id));
+        self.timeout-in: 'inventory-timeout', :2minutes;
+    }
+
+    multi method apply(InventoryReserved $e --> 'shipping') {
+        self.cancel-timeout: 'inventory-timeout';
+        self.send-command: Shipping, { :saga-id($!saga-id) }, Ship.new(:address($e.address));
+        self.register-compensation: ReleaseInventory.new(:reservation-id($e.reservation-id));
+    }
+
+    multi method apply(OrderShipped $e --> 'completed') {
+        self.register-compensation: CancelShipment.new(:tracking($e.tracking-number));
+    }
+
+    method payment-timeout {
+        self.rollback;
+        $!state = 'payment-failed';
+    }
+
+    method inventory-timeout {
+        self.rollback;
+        $!state = 'inventory-failed';
+    }
+}</code></pre>
+
+            <h2>Next Steps</h2>
+            <ul>
+                <li>See the <a href="../api/saga.html">Sourcing::Saga API Reference</a> for all available methods</li>
+                <li>Learn about the <a href="commands.html">is on-state</a> trait for state-guarded commands</li>
+                <li>Read about <a href="../api/metaclasses.html">Metaclasses</a> — how the saga keyword works</li>
+                <li>Explore <a href="aggregations.html">Aggregations</a> — sagas build on aggregation functionality</li>
+            </ul>
+        </div>
+    </main>
+</body>
+</html>
