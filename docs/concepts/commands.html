@@ -18,7 +18,7 @@
                 <a href="projections.html">Projections</a><a href="aggregations.html">Aggregations</a><a href="commands.html" class="active">Commands</a><a href="optimistic-locking.html">Optimistic Locking</a><a href="events.html">Events</a>
             </div>
             <div class="sidebar-group"><div class="sidebar-group-title">API Reference</div>
-                <a href="../api/sourcing.html">sourcing()</a><a href="../api/projection.html">Sourcing::Projection</a><a href="../api/aggregation.html">Sourcing::Aggregation</a><a href="../api/plugin.html">Sourcing::Plugin</a><a href="../api/memory.html">Sourcing::Plugin::Memory</a><a href="../api/projection-storage.html">ProjectionStorage</a><a href="../api/metaclasses.html">Metaclasses</a><a href="../api/traits.html">Traits</a><a href="../api/exceptions.html">Exceptions</a>
+                <a href="../api/sourcing.html">sourcing()</a><a href="../api/projection.html">Sourcing::Projection</a><a href="../api/aggregation.html">Sourcing::Aggregation</a><a href="../api/saga.html">Sourcing::Saga</a><a href="../api/plugin.html">Sourcing::Plugin</a><a href="../api/memory.html">Sourcing::Plugin::Memory</a><a href="../api/projection-storage.html">ProjectionStorage</a><a href="../api/metaclasses.html">Metaclasses</a><a href="../api/traits.html">Traits</a><a href="../api/exceptions.html">Exceptions</a>
             </div>
             <div class="sidebar-group"><div class="sidebar-group-title">Guides</div>
                 <a href="../guides/quick-start.html">Quick Start</a><a href="../guides/bank-account.html">Bank Account Example</a><a href="../guides/shopping-cart.html">Shopping Cart Example</a><a href="../guides/projections.html">Building Projections</a><a href="../guides/plugins.html">Writing a Plugin</a>
@@ -39,46 +39,16 @@
             <p>Commands are the right place for domain validation because they run against the <strong>most recent state</strong> of the aggregation.</p>
 
             <h2>The Command Lifecycle</h2>
-            <pre><code>Command called
-    │
-    ▼
-┌─────────────────────────────────┐
-│ 1. ^update: Reset + Replay      │
-│    • Reset all mutable attrs    │
-│      to their defaults          │
-│    • Replay ALL events from     │
-│      the store onto the agg     │
-│    • Aggregate is now fresh     │
-└──────────────┬──────────────────┘
-               │
-               ▼
-┌─────────────────────────────────┐
-│ 2. Execute command body         │
-│    • Validate against state     │
-│    • die() if validation fails  │
-│    • Emit events via $.event    │
-└──────────────┬──────────────────┘
-               │
-               ▼
-┌─────────────────────────────────┐
-│ 3. Optimistic lock check        │
-│    • Store detects if new       │
-│      events appeared since      │
-│      the ^update call           │
-│    • Throws X::OptimisticLocked │
-│      if contention detected     │
-└──────────────┬──────────────────┘
-               │
-        ┌──────┴──────┐
-        │             │
-   Success         Contention
-        │             │
-        ▼             ▼
-   Return result   Retry (up to 5x)
-                   Go to step 1
-                   │
-                   ▼ (all retries exhausted)
-             Throw X::OptimisticLocked</code></pre>
+            <div class="mermaid">
+flowchart TD
+    START[Command called] --> UPDATE[^update<br/>Reset Replay]
+    UPDATE --> EXECUTE[Execute command body<br/>Validate Emit events]
+    EXECUTE --> LOCK[Optimistic lock check]
+    LOCK -->|Success| SUCCESS[Return result]
+    LOCK -->|Contention| RETRY[Retry up to 5x]
+    RETRY -->|retry| UPDATE
+    RETRY -->|exhausted| THROW[Throw X::OptimisticLocked]
+            </div>
 
             <h2>Automatic Retry</h2>
             <p>When <code>X::OptimisticLocked</code> is thrown, the command <strong>automatically retries</strong> — up to 5 attempts. This works because:</p>
