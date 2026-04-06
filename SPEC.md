@@ -39,105 +39,87 @@ Event sourcing is a pattern where state changes are stored as a sequence of even
 
 ### Component Relationships
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Sourcing.rakumod                         │
-│  (exports: sourcing, traits, EXPORTHOW/DECLARE for metaclasses) │
-└─────────────────────────────────────────────────────────────────┘
-          │                        │
-          ▼                        ▼
-┌────────────────────┐   ┌──────────────────────────┐
-│  Roles/            │   │  Metamodel/              │
-│  - Projection      │   │  - ProjectionHOW         │
-│  - Aggregation     │   │  - AggregationHOW        │
-│  - ProjectionId    │   │  - ProjectionIdContainer │
-│  - ProjectionIdMap │   │  - EventHandlerContainer │
-└────────────────────┘   └──────────────────────────┘
-          │
-          ▼
-┌───────────────────────┐
-│  Sourcing::           │
-│  - Plugin             │
-│  - Plugin::Memory     │
-│  - ProjectionStorage  │
-│  - X::OptimisticLocked│
-└───────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Sourcing["Sourcing.rakumod"]
+        S1[exports: sourcing, traits, EXPORTHOW/DECLARE for metaclasses]
+    end
+
+    subgraph Roles["Roles/"]
+        R1[Projection]
+        R2[Aggregation]
+        R3[ProjectionId]
+        R4[ProjectionIdMap]
+    end
+
+    subgraph Metamodel["Metamodel/"]
+        M1[ProjectionHOW]
+        M2[AggregationHOW]
+        M3[SagaHOW]
+        M4[ProjectionIdContainer]
+        M5[EventHandlerContainer]
+    end
+
+    subgraph SourcingLib["Sourcing::"]
+        L1[Plugin]
+        L2[Plugin::Memory]
+        L3[ProjectionStorage]
+        L4[X::OptimisticLocked]
+    end
+
+    Sourcing --> Roles
+    Sourcing --> Metamodel
+    Roles --> SourcingLib
 ```
 
 ### CQRS + Event Sourcing Flow
 
-```
-                         ┌─────────────────────────────────────────────┐
-                         │              COMMAND SIDE (C)               │
-                         │                                             │
-   Command ──────────►  ┌──────────────────┐                           │
-                        │   Aggregation    │                           │
-                        │  (consistency    │                           │
-                        │   boundary)      │                           │
-                        │                  │                           │
-                        │  • Validates     │                           │
-                        │  • Emits events  │                           │
-                        │  • Enforces      │                           │
-                        │    invariants    │                           │
-                        └────────┬─────────┘                           │
-                                 │                                     │
-                                 │ emit(event)                         │
-                                 ▼                                     │
-                         ┌──────────────────┐                          │
-                         │   Event Store    │◄── append-only log       │
-                         │   (Plugin)       │    of immutable facts    │
-                         └────────┬─────────┘                          │
-                                  │                                    │
-                                  │ Supply (stream)                    │
-                                  ▼                                    │
-                         ┌─────────────────────────────────────────────┤
-                         │              QUERY SIDE (Q)                 │
-                         │                                             │
-                  ┌──────┴──────┐                                      │
-                  │  Projection  │                                     │
-                  │  Storage     │                                     │
-                  │  (registry)  │                                     │
-                  └──────┬──────┘                                      │
-                         │ routes events                               │
-                         ▼                                             │
-              ┌──────────────────────┐                                 │
-              │    Projections       │                                 │
-              │  (read models)       │                                 │
-              │                      │                                 │
-              │  • Dashboard view    │                                 │
-              │  • Analytics view    │                                 │
-              │  • Fraud detection   │                                 │
-              │  • Audit log         │                                 │
-              └──────────────────────┘                                 │
-                                                                       │
-                         ┌─────────────────────────────────────────────┘
-                         │
-                  Queries read from projections
-                  (never from the event store directly)
+```mermaid
+flowchart TD
+    subgraph CommandSide["COMMAND SIDE (C)"]
+        CMD[Command]
+        AGG[Aggregation<br/>consistency<br/>boundary<br/><br/>• Validates<br/>• Emits events<br/>• Enforces<br/>  invariants]
+    end
+
+    subgraph EventStore["Event Store (Plugin)"]
+        ES[append-only log<br/>of immutable facts]
+    end
+
+    subgraph QuerySide["QUERY SIDE (Q)"]
+        PS[Projection Storage<br/>(registry)]
+        PROJ[Projections<br/>(read models)<br/><br/>• Dashboard view<br/>• Analytics view<br/>• Fraud detection<br/>• Audit log]
+    end
+
+    QUERY[Queries read from projections<br/>(never from the event store directly)]
+
+    CMD -->|validates| AGG
+    AGG -->|emit(event)| ES
+    ES -->|Supply (stream)| PS
+    PS -->|routes events| PROJ
+    PROJ --> QUERY
 ```
 
 ### How Aggregations and Projections Relate
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                        Single Domain Event                           │
-│                     e.g., OrderPlaced(order-id, total)               │
-└──────────────────────────────┬───────────────────────────────────────┘
-                               │
-            ┌──────────────────┼──────────────────┐
-            │                  │                  │
-            ▼                  ▼                  ▼
-   ┌─────────────────┐ ┌──────────────┐  ┌─────────────────┐
-   │ Order Aggregate │ │  Order       │  │  Revenue        │
-   │ (write model)   │ │  Summary     │  │  Projection     │
-   │                 │ │  Projection  │  │                 │
-   │ • Enforced:     │ │              │  │ • Derived:      │
-   │   order total   │ │ • Derived:   │  │   daily totals  │
-   │   cannot be     │ │   status,     │  │ • Derived:      │
-   │   negative      │ │   item count  │  │   product sales │
-   │ • Emits:        │ │ • Used by:    │  │ • Used by:      │
-   │   OrderPlaced   │ │   order list  │  │   finance dashboard
-   └─────────────────┘ └──────────────┘  └─────────────────┘
+```mermaid
+flowchart LR
+    EVENT[Single Domain Event<br/>e.g., OrderPlaced<br/>(order-id, total)]
+
+    subgraph Aggregates["Order Aggregate"]
+        AGG[(write model)<br/><br/>• Enforced:<br/>  order total<br/>  cannot be<br/>  negative<br/><br/>• Emits:<br/>  OrderPlaced]
+    end
+
+    subgraph Proj1["Order Summary"]
+        P1[(Projection)<br/><br/>• Derived:<br/>  status,<br/>  item count<br/><br/>• Used by:<br/>  order list]
+    end
+
+    subgraph Proj2["Revenue Projection"]
+        P2[(Projection)<br/><br/>• Derived:<br/>  daily totals<br/>  product sales<br/><br/>• Used by:<br/>  finance dashboard]
+    end
+
+    EVENT --> AGG
+    EVENT --> P1
+    EVENT --> P2
 ```
 
 ---
@@ -313,25 +295,34 @@ saga CreateOrder {
 
 ### How They Work Together
 
-```
-┌────────────────────┐   ┌──────────────────────────┐
-│  Roles/            │   │  Metamodel/              │
-│  - Projection      │   │  - ProjectionHOW         │
-│  - Aggregation     │   │  - AggregationHOW        │
-│  - Saga            │   │  - SagaHOW               │
-│  - ProjectionId    │   │  - ProjectionIdContainer │
-│  - ProjectionIdMap │   │  - EventHandlerContainer │
-└────────────────────┘   └──────────────────────────┘
-          │
-          ▼
-┌───────────────────────┐
-│  Sourcing::           │
-│  - Plugin             │
-│  - Plugin::Memory     │
-│  - ProjectionStorage  │
-│  - Saga               │
-│  - X::OptimisticLocked│
-└───────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Roles["Roles/"]
+        R1[Projection]
+        R2[Aggregation]
+        R3[Saga]
+        R4[ProjectionId]
+        R5[ProjectionIdMap]
+    end
+
+    subgraph Metamodel["Metamodel/"]
+        M1[ProjectionHOW]
+        M2[AggregationHOW]
+        M3[SagaHOW]
+        M4[ProjectionIdContainer]
+        M5[EventHandlerContainer]
+    end
+
+    subgraph SourcingLib["Sourcing::"]
+        L1[Plugin]
+        L2[Plugin::Memory]
+        L3[ProjectionStorage]
+        L4[Saga]
+        L5[X::OptimisticLocked]
+    end
+
+    Roles --> SourcingLib
+    Metamodel --> SourcingLib
 ```
 
 ### Choosing Between Projection and Aggregation
@@ -1428,48 +1419,20 @@ sub withdraw-from-outside($agg, $amount) {
 
 Every `is command` method follows this exact flow:
 
-```
-Command called
-     │
-     ▼
-┌─────────────────────────────────┐
-│ 1. ^update: Incremental Update  │
-│    • Restore cached state        │
-│    • Apply only NEW events       │
-│    • For sagas: skip commands   │
-│      on already-consumed events  │
-└──────────────┬──────────────────┘
-               │
-               ▼
-┌─────────────────────────────────┐
-│ 2. Execute command body         │
-│    • Validate against state     │
-│    • die() if validation fails  │
-│    • Emit events via $.event   │
-│    • For sagas: exception      │
-│      triggers rollback + failed │
-└──────────────┬──────────────────┘
-               │
-               ▼
-┌─────────────────────────────────┐
-│ 3. Optimistic lock check        │
-│    • Store detects if new       │
-│      events appeared since      │
-│      the ^update call          │
-│    • Throws X::OptimisticLocked │
-│      if contention detected    │
-└──────────────┬──────────────────┘
-               │
-          ┌──────┴──────┐
-          │             │
-     Success         Contention
-          │             │
-          ▼             ▼
-     Return result   Retry (up to 5x)
-                     Go to step 1
-                     │
-                     ▼ (all retries exhausted)
-               Throw X::OptimisticLocked
+```mermaid
+flowchart TD
+    START[Command called] --> UPDATE[1. ^update: Incremental Update<br/>• Restore cached state<br/>• Apply only NEW events<br/>• For sagas: skip commands<br/>  on already-consumed events]
+    
+    UPDATE --> BODY[2. Execute command body<br/>• Validate against state<br/>• die() if validation fails<br/>• Emit events via $.event<br/>• For sagas: exception<br/>  triggers rollback + failed]
+    
+    BODY --> LOCK[3. Optimistic lock check<br/>• Store detects if new<br/>  events appeared since<br/>  the ^update call<br/>• Throws X::OptimisticLocked<br/>  if contention detected]
+    
+    LOCK --> DECIDE{Contention?}
+    DECIDE -->|No| SUCCESS[Return result]
+    DECIDE -->|Yes| RETRY[Retry (up to 5x)]
+    RETRY --> UPDATE
+    
+    LOCK -.->|all retries exhausted| FAIL[Throw X::OptimisticLocked]
 ```
 
 #### Automatic Retry Behavior
@@ -1646,18 +1609,15 @@ aggregation InventoryItem {
 
 Use this decision flow:
 
-```
-Do you need to VALIDATE a business rule before allowing a change?
-  ├─ Yes → Use an AGGREGATION with command methods
-  └─ No
-      │
-      Do you need to DISPLAY or QUERY data?
-        ├─ Yes → Use a PROJECTION
-        └─ No
-            │
-            Do you need to EMIT events?
-              ├─ Yes → Use an AGGREGATION
-              └─ No → You probably don't need Sourcing for this
+```mermaid
+flowchart TD
+    START[Start] --> Q1{Do you need to VALIDATE<br/>a business rule before<br/>allowing a change?}
+    Q1 -->|Yes| AGG[Use an AGGREGATION<br/>with command methods]
+    Q1 -->|No| Q2{Do you need to DISPLAY<br/>or QUERY data?}
+    Q2 -->|Yes| PROJ[Use a PROJECTION]
+    Q2 -->|No| Q3{Do you need to<br/>EMIT events?}
+    Q3 -->|Yes| AGG2[Use an AGGREGATION]
+    Q3 -->|No| NONE[You probably don't<br/>need Sourcing for this]
 ```
 
 **Concrete examples**:
