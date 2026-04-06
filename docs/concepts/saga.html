@@ -143,9 +143,15 @@ multi method apply(PaymentConfirmed $e --> 'ready-to-ship') { } # State transiti
             </table>
 
             <h2>Timeout Handling</h2>
-            <p>Long-running processes need timeouts to handle failure scenarios like a service going down. Sagas support scheduled timeouts:</p>
+            <p>Long-running processes need timeouts to handle failure scenarios like a service going down. Sagas support scheduled timeouts. By default, timeouts will call the <code>rollback</code> method to automatically undo any completed steps:</p>
             <pre><code>multi method apply(OrderPlaced $e --> 'waiting-payment') {
     # Schedule a timeout to cancel if payment isn't received
+    # This will automatically call rollback() when it fires
+    self.timeout-in: 'rollback', :5minutes;
+}</code></pre>
+            <p>You can also specify a custom timeout handler:</p>
+            <pre><code>multi method apply(OrderPlaced $e --> 'waiting-payment') {
+    # Schedule a custom timeout handler
     self.timeout-in: 'cancel-if-no-payment', :5minutes;
 }
 
@@ -157,6 +163,7 @@ method cancel-if-no-payment() {
             <table>
                 <tr><th>Method</th><th>Purpose</th></tr>
                 <tr><td><code>timeout-in($name, :5minutes)</code></td><td>Schedule a timeout from within apply()</td></tr>
+                <tr><td><code>timeout-in('rollback', :5minutes)</code></td><td>Schedule a timeout that defaults to calling rollback</td></tr>
                 <tr><td><code>cancel-timeout($name)</code></td><td>Cancel a previously scheduled timeout</td></tr>
                 <tr><td><code>verify-timeouts()</code></td><td>Check and fire expired timeouts (call periodically)</td></tr>
             </table>

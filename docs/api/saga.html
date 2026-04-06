@@ -112,13 +112,14 @@ $.undo: *.account.reverse-withdraw: 100;
             <p><strong>Note:</strong> Undo blocks complement compensation events — use events when you need auditability, use undo blocks for direct aggregate manipulation.</p>
 
             <h3>method timeout-in(Str $method-name, *%params)</h3>
-            <p>Schedules a timeout that fires after a specified duration:</p>
+            <p>Schedules a timeout that fires after a specified duration. If no method name is provided (or if the method name is <code>'rollback'</code>), the default <code>rollback</code> method will be called when the timeout fires:</p>
             <ol>
                 <li>Computes <code>scheduled-at = DateTime.now.later(|%params)</code></li>
                 <li>Adds to <code>%!timeout-handlers</code></li>
                 <li>Adds to <code>@!timeout-schedule</code> (keeping it ordered)</li>
                 <li>Emits <code>TimeOutScheduled</code> event</li>
             </ol>
+            <p><strong>Default behavior:</strong> If you call <code>self.timeout-in: 'rollback', :5minutes</code> or simply don't specify a method name that exists, the timeout will automatically call <code>self.rollback</code> when it fires. This is useful for automatically canceling long-running processes that exceed their time limit.</p>
             <p><strong>Note:</strong> Can only be called from within an <code>apply()</code> method.</p>
 
             <h3>method rollback() is command</h3>

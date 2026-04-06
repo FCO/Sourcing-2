@@ -88,17 +88,18 @@ method undo(Callable $block) {
 
 =head2 method timeout-in
 
-Schedules a timeout that fires after a specified duration.
+Schedules a timeout to call a method on the saga. If no method name is provided,
+defaults to calling C<rollback>.
 
 =head3 Parameters
 
-=head4 C<Str $method-name> — The name of the handler method to call when timeout fires
+=head4 C<Str $method-name> — The name of the handler method to call when timeout fires (default: 'rollback')
 
 =head4 C<*%params> — Named arguments passed to L<DateTime::Duration/"later"> to compute the timeout
 
 =end pod
 
-method timeout-in(Str $method-name, *%params) {
+method timeout-in(Str $method-name = 'rollback', *%params) {
 	my $scheduled-at = DateTime.now.later: |%params;
 	$!timeout-handlers{$method-name} = $scheduled-at;
 	@.timeout-schedule.push: Pair.new($scheduled-at, Set.new($method-name));
