@@ -1,139 +1,53 @@
-use Metamodel::AggregationHOW;
-use Sourcing::Aggregation;
-use Sourcing::Plugin;
-use Sourcing::X::OptimisticLocked;
+use v6.e.PREVIEW;
+
+use Sourcing::Plugin::EventStore;
+use Sourcing::Plugin::EventStore::Memory;
+use Sourcing::Plugin::StateCache;
+use Sourcing::Plugin::StateCache::Memory;
 
 =begin pod
 
 =head1 NAME
 
-Sourcing::Plugin::Memory - In-memory event storage plugin
+Sourcing::Plugin::Memory - In-memory event storage and state cache plugin
 
 =head1 DESCRIPTION
 
 A simple in-memory implementation of L<Sourcing::Plugin> for development
-and testing. Events are stored in memory and a supply emits them in order.
+and testing. This class combines L<Sourcing::Plugin::EventStore::Memory>
+and L<Sourcing::Plugin::StateCache::Memory> for backward compatibility.
+
+For new code, you can use the separate roles:
+=item L<Sourcing::Plugin::EventStore::Memory> for event storage
+=item L<Sourcing::Plugin::StateCache::Memory> for state caching
 
 =end pod
 
-# use Sourcing::X::OptimisticLocked;
 unit class Sourcing::Plugin::Memory;
-also does Sourcing::Plugin;
+also does Sourcing::Plugin::EventStore;
+also does Sourcing::Plugin::StateCache;
 
-has Supplier $.supplier .= new;
-has Supply() $.supply    = $!supplier;
-has @.events;
-has %.store;
+has Sourcing::Plugin::EventStore::Memory $.event-store .= new;
+has Sourcing::Plugin::StateCache::Memory $.state-cache .= new;
 
 =begin pod
 
 =head1 METHODS
 
-=head2 submethod TWEAK
+=head2 method emit
 
-Initializes the supplier tap to capture events as they are emitted.
-
-=end pod
-
-submethod TWEAK(|) {
-	$!supply.tap: -> $event { @!events.push: $event }
-}
-
-=begin pod
-
-=head2 multi method emit
-
-Basic event emission without optimistic locking. Simply emits the event
-to the supplier for distribution.
+Emits an event to the storage backend.
 
 =head3 Parameters
 
 =head4 C<$event> — The event to emit
 
-=end pod
-
-multi method emit($event) {
-	$!supplier.emit: $event
-}
-
-=begin pod
-
-=head2 multi method emit
-
-Event emission with optimistic locking support. Validates the current
-version before emitting to detect concurrent modifications.
-
-=head3 Parameters
-
-=head4 C<$event> — The event to emit
-
-=head4 C<:$type> — The aggregate type
-
-=head4 C<:%ids> — Identity attributes for the aggregate
-
-=head4 C<:$current-version> — Expected current version for optimistic locking
+=head4 C<:$current-version> — The current version of the aggregate (optional)
 
 =end pod
 
-multi method emit($event, :$type, :%ids!, :$current-version!) {
-	unless $type ~~ Sourcing::Aggregation {
-		die "Only aggregations can emit events. Projections are read-only.";
-	}
-	my $key = $type.WHAT.^name;
-	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
-	my $store := %!store{$key};
-	$store{$id-key}:exists || ($store{$id-key} = Hash.new);
-	my atomicint $last-id = -1;
-	$store{$id-key}<last-id> //= $last-id;
-	my $current := $store{$id-key}<last-id>;
-	my $new-version = $current-version + 1;
-	my $old-value = cas($current, $current-version, $new-version);
-	unless $old-value == $current-version {
-		Sourcing::X::OptimisticLocked.new(
-			:type($type),
-			:ids(%ids),
-			:expected-version($current-version),
-			:actual-version($old-value)
-		).throw
-	}
-	$store{$id-key}<last-id> = $new-version;
-	$.emit: $event
-}
-
-=begin pod
-
-=head2 sub get-events
-
-Filter function that selects events matching the given identity criteria.
-
-=head3 Parameters
-
-=head4 C<@events> — The list of events to filter
-
-=head4 C<%ids> — Identity attribute names and values to match
-
-=head4 C<%map> — Event type to identity attribute mapping
-
-=head3 Returns
-
-Filtered list of matching events.
-
-=end pod
-
-sub get-events(@events, %ids, %map) {
-	@events.grep: -> $event {
-		next unless $event.WHAT ~~ %map.keys.any;
-		my $event-type = $event.WHAT;
-		do if %map{$event-type} {
-			my %event-map := %map{$event-type};
-			[&&] do for %ids.kv -> $key, $value {
-				my $event-key = %event-map{$key};
-				$event."$event-key"() ~~ $value
-			}
-		} else {
-			True
-		}
-	}
+method emit($event, |c) {
+	$!event-store.emit: $event, |c
 }
 
 =begin pod
@@ -155,15 +69,14 @@ Filtered list of events from the internal store.
 =end pod
 
 method get-events(%ids, %map) {
-	@!events.&get-events: %ids, %map
+	$!event-store.get-events: %ids, %map
 }
 
 =begin pod
 
 =head2 method get-events-after
 
-Retrieves events after a specific version, suitable for catching up
-projections to the current state.
+Retrieves events after a specific version.
 
 =head3 Parameters
 
@@ -180,22 +93,40 @@ Sequence of events after the given version.
 =end pod
 
 method get-events-after(Int $id, %ids, %map) {
-	@!events.&get-events(%ids, %map).skip: $id + 1
+	$!event-store.get-events-after: $id, %ids, %map
 }
 
 =begin pod
 
-=head2 method number-of-events
+=head2 method supply
 
-Returns the total number of events stored.
+Returns a L<Supply> of events from this storage backend.
 
 =head3 Returns
 
-The count of events in the store.
+A L<Supply> that emits events as they are stored.
 
 =end pod
 
-method number-of-events { @!events.elems }
+method supply {
+	$!event-store.supply
+}
+
+=begin pod
+
+=head2 method events
+
+Returns the list of stored events.
+
+=head3 Returns
+
+The list of events.
+
+=end pod
+
+method events {
+	$!event-store.events
+}
 
 =begin pod
 
@@ -212,7 +143,7 @@ Stores projection state using the projection's built-in serialization method.
 =end pod
 
 multi method store-cached-data($proj where *.HOW.^can("data-to-store"), UInt :$last-id!) {
-	$.store-cached-data: $proj, $proj.^projection-id-pairs, $proj.^data-to-store, :$last-id
+	$!event-store.store-cached-data: $proj, :$last-id
 }
 
 =begin pod
@@ -230,10 +161,7 @@ Stores projection state by extracting attribute values from the instance.
 =end pod
 
 multi method store-cached-data($proj, Int :$last-id!) {
-	my %data = do for $proj.^attributes.grep({ .has_accessor }) -> $attr {
-		$attr.name.substr(2) => $attr.get_value: $proj
-	}
-	$.store-cached-data: $proj.WHAT, $proj.^projection-id-pairs, %data, :$last-id
+	$!event-store.store-cached-data: $proj, :$last-id
 }
 
 =begin pod
@@ -255,23 +183,20 @@ Low-level method to store projection data under a specific key.
 =end pod
 
 multi method store-cached-data(Mu:U $proj, %ids, %data, Int :$last-id!) {
-	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
-	%!store{$proj.^name}:exists || (%!store{$proj.^name} = Hash.new);
-	%!store{$proj.^name}{$id-key}<data> = %data;
-	%!store{$proj.^name}{$id-key}<last-id> = $last-id;
+	$!event-store.store-cached-data: $proj, %ids, %data, :$last-id
 }
 
 =begin pod
 
 =head2 method get-cached-data
 
-Retrieves the cached state and version for a projection instance.
+Retrieves the cached state and version for a projection.
 
 =head3 Parameters
 
 =head4 C<Mu:U $proj> — The projection type
 
-=head4 C<%ids> — Identity attribute values
+=head4 C<%ids> — Identity criteria
 
 =head3 Returns
 
@@ -280,11 +205,38 @@ A hash containing C<last-id> and C<data> for the projection.
 =end pod
 
 method get-cached-data(Mu:U $proj, %ids) is rw {
-	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
-	%!store{$proj.^name}:exists || (%!store{$proj.^name} = Hash.new);
-	%!store{$proj.^name}{$id-key}:exists || (%!store{$proj.^name}{$id-key} = Hash.new);
-	my atomicint $last-id = -1;
-	%!store{$proj.^name}{$id-key}<last-id> //= $last-id;
-	%!store{$proj.^name}{$id-key}<data> //= %();
-	%!store{$proj.^name}{$id-key}
+	$!event-store.get-cached-data: $proj, %ids
+}
+
+=begin pod
+
+=head2 method number-of-events
+
+Returns the total number of events stored.
+
+=head3 Returns
+
+The count of events in the store.
+
+=end pod
+
+method number-of-events {
+	$!event-store.number-of-events
+}
+
+=begin pod
+
+=head2 method use
+
+Activates this plugin as the current sourcing configuration by
+setting the C<PROCESS> variable.
+
+=head3 Parameters
+
+=head4 C<|c> — Configuration arguments passed to the plugin constructor
+
+=end pod
+
+method use(|c) {
+	PROCESS::<$SourcingConfig> = self.new: |c;
 }

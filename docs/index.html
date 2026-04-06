@@ -255,6 +255,10 @@
                 <a href="api/aggregation.html">Sourcing::Aggregation</a>
                 <a href="api/saga.html">Sourcing::Saga</a>
                 <a href="api/plugin.html">Sourcing::Plugin</a>
+                <a href="api/event-store.html">Sourcing::Plugin::EventStore</a>
+                <a href="api/state-cache.html">Sourcing::Plugin::StateCache</a>
+                <a href="api/event-store-memory.html">Sourcing::Plugin::EventStore::Memory</a>
+                <a href="api/state-cache-memory.html">Sourcing::Plugin::StateCache::Memory</a>
                 <a href="api/memory.html">Sourcing::Plugin::Memory</a>
                 <a href="api/projection-storage.html">ProjectionStorage</a>
                 <a href="api/metaclasses.html">Metaclasses</a>
@@ -370,7 +374,9 @@ say "Order {$view.order-id}: {$view.status} — \${$view.total}";
                 <tr><td><code>Metamodel::ProjectionHOW</code></td><td>Metaclass for projection declarations</td></tr>
                 <tr><td><code>Metamodel::AggregationHOW</code></td><td>Metaclass for aggregation declarations</td></tr>
                 <tr><td><code>Sourcing::Plugin</code></td><td>Abstract interface for storage backends</td></tr>
-                <tr><td><code>Sourcing::Plugin::Memory</code></td><td>In-memory implementation for testing</td></tr>
+                <tr><td><code>Sourcing::Plugin::EventStore</code></td><td>Event storage interface (emit, get-events, supply)</td></tr>
+                <tr><td><code>Sourcing::Plugin::StateCache</code></td><td>State caching interface (store-cached-data, get-cached-data)</td></tr>
+                <tr><td><code>Sourcing::Plugin::Memory</code></td><td>Combined in-memory implementation for testing</td></tr>
                 <tr><td><code>Sourcing::ProjectionStorage</code></td><td>Registry for automatic projection updates</td></tr>
                 <tr><td><code>Sourcing::X::OptimisticLocked</code></td><td>Exception for concurrency conflicts</td></tr>
             </table>
