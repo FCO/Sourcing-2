@@ -16,6 +16,7 @@
     "Metamodel::EventHandlerContainer": "lib/Metamodel/EventHandlerContainer.rakumod",
     "Metamodel::ProjectionHOW": "lib/Metamodel/ProjectionHOW.rakumod",
     "Metamodel::ProjectionIdContainer": "lib/Metamodel/ProjectionIdContainer.rakumod",
+    "Metamodel::SagaHOW": "lib/Metamodel/SagaHOW.rakumod",
     "Sourcing": "lib/Sourcing.rakumod",
     "Sourcing::Aggregation": "lib/Sourcing/Aggregation.rakumod",
     "Sourcing::Plugin": "lib/Sourcing/Plugin.rakumod",
@@ -24,6 +25,8 @@
     "Sourcing::ProjectionId": "lib/Sourcing/ProjectionId.rakumod",
     "Sourcing::ProjectionIdMap": "lib/Sourcing/ProjectionIdMap.rakumod",
     "Sourcing::ProjectionStorage": "lib/Sourcing/ProjectionStorage.rakumod",
+    "Sourcing::Saga": "lib/Sourcing/Saga.rakumod",
+    "Sourcing::Saga::Events": "lib/Sourcing/Saga/Events.rakumod",
     "Sourcing::X::OptimisticLocked": "lib/Sourcing/X/OptimisticLocked.rakumod"
   },
   "resources": [

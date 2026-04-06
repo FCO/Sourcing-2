@@ -18,29 +18,32 @@ Source code: L<https://github.com/FCO/Sourcing-2>
 
 =head1 SYNOPSIS
 
-    use Sourcing;
+use Sourcing;
 
-    class MyProjection is Sourcing::Projection {
-        has $.id is projection-id;
-        has $.name;
+class MyProjection is Sourcing::Projection {
+has $.id is projection-id;
+has $.name;
 
-        method apply(MyEvent $e) { ... }
-    }
+method apply(MyEvent $e) { ... }
+}
 
 =end pod
 
 use Sourcing::Projection;
 use Sourcing::ProjectionId;
 use Sourcing::ProjectionIdMap;
+use Sourcing::Saga;
 use Sourcing::X::OptimisticLocked;
 
 my package EXPORTHOW {
 	package DECLARE {
 		use Metamodel::ProjectionHOW;
 		use Metamodel::AggregationHOW;
+		use Metamodel::SagaHOW;
 
 		constant projection  = Metamodel::ProjectionHOW;
 		constant aggregation = Metamodel::AggregationHOW;
+		constant saga        = Metamodel::SagaHOW;
 	}
 }
 
@@ -82,7 +85,7 @@ cached instances.
 
 =head3 Example
 
-    my $projection = sourcing MyProjection, :id($some-id);
+my $projection = sourcing MyProjection, :id($some-id);
 
 =end pod
 
@@ -113,11 +116,11 @@ retry loop that:
 1. Calls C<^update> to reset and replay the aggregate from the event store
 2. Executes the command body (validation and event emission)
 3. If C<Sourcing::X::OptimisticLocked> is thrown during event emission,
-   the loop retries from step 1 (up to 5 attempts total)
+the loop retries from step 1 (up to 5 attempts total)
 4. Non-locking exceptions (e.g., validation errors) are re-thrown
-   immediately without retry
+immediately without retry
 5. After exhausting all 5 attempts, the last C<X::OptimisticLocked>
-   exception is re-thrown
+exception is re-thrown
 
 =head3 trait_mod:<is>(Method $m, :$projection-id-map)
 
@@ -137,6 +140,7 @@ to correlate events with specific projection instances.
 
 multi trait_mod:<is>(Method $m, Bool :$command where *.so) is export {
 	$m.wrap: method (|c) {
+		return Nil if defined $*SourcingReplay && $*SourcingReplay === True;
 		my &next = nextcallee;
 		my $success = False;
 		my $result;
@@ -179,4 +183,23 @@ multi trait_mod:<is>(Method $r, Str :$projection-id) is export {
 	die "Trying to set a generic projection id to a method on a type with multiple or no projection ids (@ids.join(", "))"
 	unless @ids == 1;
 	trait_mod:<is>($r, :projection-id-map{ @ids.head.name.substr(2) => $projection-id })
+}
+
+=begin pod
+
+=head3 trait_mod:<is>(Method $m, :$on-state)
+
+Marks a method as being guarded by a specific state. The method will only
+execute if the saga is in one of the specified states.
+
+=end pod
+
+multi trait_mod:<is>(Method $m, :$on-state) is export {
+	$m.wrap: method (|c) {
+		if $on-state ~~ $.state {
+			nextsame
+		} else {
+			die "Command { $m.name } can only be called in states: {$on-state.raku}. Current state: $.state"
+		}
+	}
 }

@@ -17,14 +17,11 @@ Source code: [https://github.com/FCO/Sourcing-2](https://github.com/FCO/Sourcing
 SYNOPSIS
 ========
 
-    use Sourcing;
+use Sourcing;
 
-    class MyProjection is Sourcing::Projection {
-        has $.id is projection-id;
-        has $.name;
+class MyProjection is Sourcing::Projection { has $.id is projection-id; has $.name;
 
-        method apply(MyEvent $e) { ... }
-    }
+method apply(MyEvent $e) { ... } }
 
 VARIABLES
 =========
@@ -54,7 +51,7 @@ A new instance of the projection type with all relevant events applied. Each cal
 
 ### Example
 
-    my $projection = sourcing MyProjection, :id($some-id);
+my $projection = sourcing MyProjection, :id($some-id);
 
 TRAITS
 ======
@@ -81,4 +78,8 @@ Marks a method as providing a projection identifier. The method's return value b
 ### trait_mod:<is>(Attribute $r, Bool :$projection-id)
 
 Marks an attribute as a projection identifier. This attribute's value is used to correlate events with specific projection instances.
+
+### trait_mod:<is>(Method $m, :$on-state)
+
+Marks a method as being guarded by a specific state. The method will only execute if the saga is in one of the specified states.
 

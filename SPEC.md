@@ -22,13 +22,14 @@ Event sourcing is a pattern where state changes are stored as a sequence of even
 
 - **Projections** (Query side / Q in CQRS): Read-only representations that evolve by applying events to build query-optimized read models. Multiple projections can be derived from the same event stream for different purposes.
 - **Aggregations** (Command side / C in CQRS): Stateful entities that validate commands against current state, enforce business invariants, and emit events that describe state changes.
+- **Sagas** (Orchestration): Long-running, multi-step business processes that coordinate commands across multiple aggregations. Sagas maintain state machines, track compensating transactions for rollback, and support timeout handling.
 - **Declarative ID mapping**: Map event properties to projection identifiers using traits (`is projection-id`, `is projection-id<>`)
 - **Plugin architecture**: Pluggable event storage backends (in-memory, database, etc.)
 
 ### Key Design Decisions
 
-1. **Metaclass-based**: Uses custom metaclasses (`ProjectionHOW`, `AggregationHOW`) that inherit from `Metamodel::ClassHOW` to add introspection capabilities
-2. **Role-based composition**: Composes functionality through roles (`Sourcing::Projection`, `Sourcing::Aggregation`)
+1. **Metaclass-based**: Uses custom metaclasses (`ProjectionHOW`, `AggregationHOW`, `SagaHOW`) that inherit from `Metamodel::ClassHOW` to add introspection capabilities
+2. **Role-based composition**: Composes functionality through roles (`Sourcing::Projection`, `Sourcing::Aggregation`, `Sourcing::Saga`)
 3. **Trait-driven**: Uses Raku's trait system (`trait_mod:<is>`) for declarative configuration
 4. **Supply-based**: Uses Raku's `Supply` for event streaming
 
@@ -219,55 +220,118 @@ The aggregate is the gatekeeper. Every state change must pass through it. It ans
 - **Name after domain concepts**, not technical terms. `BankAccount`, not `AccountEntity`.
 - **One aggregate per transaction.** Don't try to modify multiple aggregates atomically — use eventual consistency and compensating events instead.
 
+### Sagas: The Orchestrator
+
+**A saga is a long-running business process that coordinates commands across multiple aggregations.** Unlike an aggregation (which is a single consistency boundary), a saga spans multiple aggregations and manages the workflow between them using the Saga pattern — if any step fails, previously completed steps are compensated (rolled back).
+
+**When to use a saga:**
+
+- You need to coordinate a multi-step process across multiple aggregations (e.g., create order → reserve credit → process payment → ship)
+- You need to roll back completed steps if a later step fails (compensating transactions)
+- You need to track the progress of a long-running workflow through named states
+- You need timeout handling for steps that take too long
+
+**Key characteristics:**
+
+| Property | Description |
+|---|---|
+| **State machine** | Sagas track their progress through named states. State transitions are declared via the return type of `apply()` methods (e.g., `--> 'order-created'`). |
+| **Compensating transactions** | Each step can register a compensation event. If the saga fails, `rollback()` emits compensations in LIFO order. |
+| **Commands during replay are skipped** | When `^update` replays events, any commands called inside `apply()` return `Nil` immediately (via `$*SourcingReplay`). This prevents double-execution of commands on other aggregations. |
+| **Incremental update** | `^update` restores cached state and applies only new events. Already-consumed events replay with commands skipped, new events replay with commands running. |
+| **Cache required** | Sagas require a caching-capable plugin. Without cache, the saga cannot distinguish consumed from unconsumed events. `sourcing(SagaType, ...)` fails if the plugin doesn't support caching. |
+| **Aggregation binding** | Sagas can declare attributes typed as other aggregations. At compose time, the metaclass discovers these and generates binding events. Late binding via `$!attr .= new: :id(42)` emits a `SagaAggregationBound` event. |
+| **Timeout support** | Sagas can schedule timeouts with `self.timeout-in('handler-name', :$duration)` from within `apply()`. Params are forwarded to `DateTime.now.later`. The handler-name is used as the timeout identifier. `self.cancel-timeout('handler-name')` cancels it. An external scheduler calls `verify-timeouts()` periodically (~every 10s), which emits `TimedOut` events for expired timeouts. `apply(TimedOut)` dispatches to the registered handler method. |
+
+**Best practices:**
+
+1. **apply() records state, commands execute actions.** apply() methods should primarily update the saga's internal state. Commands on other aggregations can be called from apply() — they are automatically skipped during replay via `$*SourcingReplay`.
+2. **Register compensations early.** Call `self.register-compensation: $event` as soon as a step succeeds, so rollback is always possible.
+3. **Use explicit state names.** The return type syntax `--> 'state-name'` on apply methods declares the new state. Keep state names descriptive and consistent.
+4. **Guard commands with `is on-state()`.** Use the trait to ensure commands only run in valid states. Supports junctions: `is on-state('pending' | 'processing')`.
+5. **Commands may be retried after crashes.** If a saga crashes mid-execution, unprocessed events are re-applied on restart, which may re-run commands. Target aggregations should handle idempotent commands.
+6. **Any unhandled exception triggers compensation.** If any method (including `apply()` or command methods) throws an exception, the saga automatically emits all registered compensations in LIFO order and transitions to the `'failed'` state.
+
+**Example — An order creation saga:**
+
+```raku
+use Sourcing;
+use Sourcing::Plugin::Memory;
+
+class OrderRequested   { has $.saga-id; has $.customer-id; has $.total }
+class OrderCreated     { has $.order-id; has $.customer-id; has $.total }
+class CreditReserved   { has $.order-id; has $.amount }
+class CreditRejected   { has $.order-id; has $.reason }
+class PaymentProcessed { has $.order-id; has $.amount }
+class OrderCancelled   { has $.order-id }
+class CreditReleased   { has $.order-id }
+
+saga CreateOrder {
+    has Str  $.saga-id is projection-id;
+    has Str  $.state = 'pending';
+    has Order    $.order;
+    has Customer $.customer;
+
+    # Step 1: Handle request
+    multi method apply(OrderRequested $e --> 'order-creating') {
+        $!customer = sourcing Customer, :id($e.customer-id);
+        $.order-created: :customer-id($e.customer-id), :total($e.total);
+        self.register-compensation: OrderCancelled.new(:order-id($!order-id));
+    }
+
+    # Step 2: Order created, reserve credit
+    multi method apply(OrderCreated $e --> 'credit-reserving') {
+        $!order = sourcing Order, :id($e.order-id);
+        $!customer.reserve-credit: :amount($e.total);
+        self.register-compensation: OrderCancelled.new(:order-id($e.order-id));
+        # Schedule a 30-minute timeout for the credit reservation
+        self.timeout-in: 'expire-reservation', :30minutes;
+    }
+
+    # Step 3: Credit reserved, process payment
+    multi method apply(CreditReserved $e --> 'processing-payment') {
+        $.payment-processed: :amount($e.amount);
+    }
+
+    multi method apply(CreditRejected $e --> 'failed') {
+        self.rollback;
+    }
+
+    # Timeout handler — called automatically when the timeout fires
+    method expire-reservation() {
+        self.rollback;
+        'expired'
+    }
+
+    # Commands guarded by state
+    method cancel() is on-state(none <completed failed expired>) is command {
+        self.rollback;
+        'cancelled'
+    }
+}
+```
+
 ### How They Work Together
 
 ```
-User clicks "Withdraw $100"
-         │
-         ▼
-┌─────────────────────┐
-│  Command arrives    │
-│  at aggregation     │
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│  Aggregate loads    │
-│  current state      │
-│  from event stream  │
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│  Validates:         │
-│  "Is balance ≥ 100?"│
-│  → Yes, proceed     │
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│  Emits event:       │
-│  Withdrawn($100)    │
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────┐
-│  Event is appended to the event store       │
-│  and broadcast on the Supply:               │
-│                                             │
-│  ┌──────────────────┐  ┌──────────────────┐ │
-│  │ BalanceProjection│  │ AuditProjection  │ │
-│  │ balance -= 100   │  │ log(withdrawn)   │ │
-│  └──────────────────┘  └──────────────────┘ │
-│  ┌──────────────────┐  ┌──────────────────┐ │
-│  │ FraudProjection  │  │ DashboardProj.   │ │
-│  │ check_pattern()  │  │ update_chart()   │ │
-│  └──────────────────┘  └──────────────────┘ │
-└─────────────────────────────────────────────┘
-         │
-         ▼
-   User sees updated
-   balance (from projection)
+┌────────────────────┐   ┌──────────────────────────┐
+│  Roles/            │   │  Metamodel/              │
+│  - Projection      │   │  - ProjectionHOW         │
+│  - Aggregation     │   │  - AggregationHOW        │
+│  - Saga            │   │  - SagaHOW               │
+│  - ProjectionId    │   │  - ProjectionIdContainer │
+│  - ProjectionIdMap │   │  - EventHandlerContainer │
+└────────────────────┘   └──────────────────────────┘
+          │
+          ▼
+┌───────────────────────┐
+│  Sourcing::           │
+│  - Plugin             │
+│  - Plugin::Memory     │
+│  - ProjectionStorage  │
+│  - Saga               │
+│  - X::OptimisticLocked│
+└───────────────────────┘
 ```
 
 ### Choosing Between Projection and Aggregation
@@ -298,11 +362,13 @@ Ask these questions:
 | `sourcing`                 | Sub      | Creates a fresh projection/aggregation instance            |
 | `projection`               | Constant | Metaclass declaration for projections                  |
 | `aggregation`              | Constant | Metaclass declaration for aggregations                 |
+| `saga`                    | Constant | Metaclass declaration for sagas                        |
 | `is projection-id`         | Trait    | Marks attribute as projection identifier               |
 | `is projection-id-map`     | Trait    | Maps apply method to custom ID field                   |
 | `is projection-id<>`       | Trait    | Shorthand for single ID mapping                        |
 | `is command`               | Trait    | Wraps method with reset, replay, validation, and auto-retry |
 | `is command(False)`        | Trait    | Marks a method as explicitly NOT a command. Prevents `AggregationHOW` from auto-generating an event-emitting method with the same name. |
+| `is on-state()`            | Trait    | Guards command execution to specific saga states (supports junctions) |
 
 **Public API**:
 
@@ -570,6 +636,194 @@ method projection-id-map { %!projection-id-map }
 
 ---
 
+### Sourcing::Saga
+
+**Purpose**: Role applied to all saga classes. Provides state machine, compensation tracking, timeout scheduling, and aggregation binding infrastructure.
+
+**Location**: `lib/Sourcing/Saga.rakumod`
+
+**Key characteristics**:
+
+| Property | Description |
+|---|---|
+| **Inherits from aggregation** | A saga is both an aggregation and a projection. It can emit events (via inherited command methods) and consume events (via `apply` methods). |
+| **State machine** | Each `apply` method declares its resulting state via the return type syntax `--> 'state-name'`. The saga transitions through named states as events are processed. |
+| **Compensation stack** | Sagas maintain a LIFO stack of compensation events registered via `register-compensation`. On failure, `rollback()` emits them in reverse order. |
+| **Aggregation binding** | Attributes typed as aggregations are loaded lazily via `sourcing()` when the saga binds to them. |
+| **Timeout scheduling** | Timeouts can be scheduled with `timeout-in($duration, 'handler-name')`. |
+| **Exception handling** | Any unhandled exception in an `apply` or command method triggers automatic compensation and transitions to `'failed'` state. |
+
+**Attributes**:
+```raku
+has Str  $.state;                   # Current saga state
+has Mu   @!compensations;           # LIFO stack of compensation events
+has Pair @!timeout-schedule;        # Array of Pair — DateTime => Set of method-names, kept ordered
+has Hash %!timeout-handlers{Str}; # method-name => Hash{:date-time, :method-name}
+```
+
+**Public Methods**:
+```raku
+method register-compensation(Mu $event)
+# Adds compensation event to the LIFO stack.
+# Call immediately after a step succeeds so rollback is always possible.
+
+method timeout-in(Str $method-name, *%params)
+# Schedules a timeout:
+# 1. Computes scheduled-at = DateTime.now.later: |%params
+# 2. Adds to %!timeout-handlers: $method-name => Hash{:date-time, :method-name}
+# 3. Adds to @!timeout-schedule: $date-time => Set($method-name) (as a Pair, keeping order)
+# 4. Emits TimeOutScheduled event with the method-name and scheduled-at
+# Can only be called from within an apply() method.
+
+method rollback() is command
+# Emits all registered compensations in LIFO order.
+# Clears the compensation stack.
+# Called automatically when any exception is thrown.
+
+method verify-timeouts() is command
+# Iterates over @!timeout-schedule (which is ordered by DateTime)
+# While the next entry's DateTime is <= DateTime.now:
+#   1. Gets the handler name from the Set
+#   2. Emits TimedOut event with the handler name
+#   3. Removes the entry from @!timeout-schedule
+# This command should be called periodically (e.g., every 10 seconds)
+# by an external scheduler or background process.
+
+method cancel-timeout(Str $method-name)
+# Cancels a scheduled timeout by name:
+# 1. Removes the entry from %!timeout-handlers
+# 2. Removes all entries with that method-name from @!timeout-schedule
+```
+
+**Internal Classes**:
+```raku
+class TimeOutScheduled {
+    has Str  $.handler-name;    # Method name to call when fired
+    has DateTime $.scheduled-at; # When the timeout fires
+}
+
+class TimedOut {
+    has Str $.handler-name;  # Matches the name from TimeOutScheduled
+}
+
+class SagaCreated {
+    has $.saga-id;
+    has $.saga-type;
+    has Hash %.aggregation-ids;  # { attr-name => { id-name => value, ... }, ... }
+}
+
+class SagaAggregationBound {
+    has $.saga-id;
+    has Str  $.attribute-name;
+    has Str  $.aggregation-type;
+    has Hash %.ids;  # projection-id field names => values
+}
+```
+
+**How Timeout Scheduling Works (step by step)**:
+
+1. **Scheduling** (inside `apply()`):
+   ```
+   self.timeout-in: "cancel-order", :30seconds;
+   ```
+   - Computes `scheduled-at = DateTime.now.later(:30seconds)`
+   - Stores in `%!timeout-handlers`: `"cancel-order" => {:date-time(...), :method-name("cancel-order")}`
+   - Stores in `@!timeout-schedule`: `Pair.new(DateTime(...), Set.new("cancel-order"))`
+   - Emits `TimeOutScheduled` event (persisted to event store)
+
+2. **Replaying TimeOutScheduled** (inside `apply(TimeOutScheduled $e)`):
+   - Restores the entry into `%!timeout-handlers` and `@!timeout-schedule`
+   - This ensures the timeout is rescheduled if the saga is rebuilt
+
+3. **Firing timeouts** (via `verify-timeouts()` command, called every ~10 seconds):
+   ```
+   for @!timeout-schedule {
+       last if .key > DateTime.now;           # not yet
+       my $handler-name = .value.head;        # get handler name
+       $.timed-out: handler-name => $handler-name;  # emit TimedOut event
+       .value; .value.clear;                  # mark as fired
+   }
+   @!timeout-schedule .= grep: .value.Bool;   # remove fired entries
+   ```
+
+4. **Handling TimedOut** (inside `apply(TimedOut $e)`):
+   - Gets the handler name from `$.handler-name`
+   - Looks up `$handler-name` in `%!timeout-handlers` to get the stored metadata
+   - Calls `$self."$handler-name"()` via dynamic method dispatch
+
+5. **Canceling a timeout** (inside `apply()`):
+   To cancel a timeout, simply call `cancel-timeout` with the handler name:
+   ```
+   self.cancel-timeout: "cancel-order";
+   ```
+   This removes the entry from `%!timeout-handlers` and all entries with that method-name from `@!timeout-schedule`.
+
+**Interactions**:
+- Composed by `SagaHOW` metaclass
+- Inherits from `Sourcing::Aggregation`, so sagas are also aggregations (can emit events)
+- `SagaHOW` auto-generates `apply` handlers for internal events (`TimeOutScheduled`, `TimedOut`, `SagaCreated`, `SagaAggregationBound`)
+
+**Example — A transfer saga with timeouts:**
+
+```raku
+saga AccountTransfer {
+    has Str    $.saga-id is projection-id;
+    has Str    $.state = 'pending';
+    has Account $.from-account;
+    has Account $.to-account;
+    has Rat    $.amount;
+
+    multi method apply(TransferRequested $e --> 'ready') {
+        $!from-account = sourcing Account, :id($e.from-id);
+        $!to-account   = sourcing Account, :id($e.to-id);
+        $!amount = $e.amount;
+        self.timeout-in: 'cancel-transfer', :5minutes;
+    }
+
+    method execute() is on-state('ready') is command {
+        $!from-account.withdraw: $!amount;
+        'transferring'
+    }
+
+    multi method apply(Withdrawn $e --> 'depositing') {
+        $!to-account.deposit: $!amount;
+        self.register-compensation: WithdrawnReversed.new(:id($e.id), :amount($e.amount));
+        self.register-compensation: DepositedReversed.new(:id($e.id), :amount($!amount));
+        # Replace the cancellation timeout (scheduled earlier) with a delivery confirmation timeout
+        # Calling timeout-in with the same handler name automatically replaces the previous timeout
+        self.timeout-in: 'confirm-delivery', :5minutes;
+    }
+
+    multi method apply(Deposited $e --> 'completed') { }
+
+    # Timeout handler — called automatically when the timeout fires
+    method cancel-transfer() {
+        self.rollback;
+        'cancelled'
+    }
+
+    method confirm-delivery() is on-state('depositing') {
+        # Final confirmation step
+        'completed'
+    }
+
+    method cancel() is on-state(none <completed rolled-back>) is command {
+        self.rollback;
+        'rolled-back'
+    }
+}
+
+# External scheduler calls verify-timeouts periodically:
+every-10-seconds:
+    for @active-sagas {
+        $_.verify-timeouts;
+    }
+```
+
+---
+
+---
+
 ## Metamodel Classes
 
 ### Metamodel::ProjectionHOW
@@ -587,12 +841,25 @@ method compose(Mu $proj, |)
 # 3. Calls nextsame for standard composition
 
 method update($proj)
-# Resets and replays the aggregate:
-# 1. Creates a fresh instance to get default values
-# 2. Resets all mutable attributes (preserving projection-ids)
-# 3. Fetches all events for the given identity from the store (from version -1)
-# 4. Applies each event via $proj.apply: $event
-# 5. Updates version to total events applied - 1
+# Incremental update from cached state:
+# 1. Gets cached last-id and data from the store
+# 2. Restores cached attribute values (preserving projection-ids)
+# 3. Fetches events AFTER the applied version from the store
+# 4. Applies each new event via $proj.apply: $event
+# 5. Updates $!__current-version__ and stores updated cache
+# For sagas: commands in apply() are skipped for already-consumed events
+#   (via $*SourcingReplay) and only run for truly new events.
+
+method rebuild($proj)
+# Full reset and replay from the event store:
+# 1. Creates a fresh instance to obtain default attribute values
+# 2. Resets all mutable attributes (preserving projection-id attributes)
+# 3. Fetches ALL events from the store (from version -1)
+# 4. Applies each event with $*SourcingReplay = True (commands are skipped)
+# 5. Updates $!__current-version__ to total events applied minus one
+# 6. Stores updated cached data via $*SourcingConfig.store-cached-data
+# Use this when fixing bugs in apply() methods that require re-processing
+# all historical events.
 ```
 
 **Introspection Methods** (provided by composed roles):
@@ -643,6 +910,71 @@ For an event `MyEvent` with projection ID `$!id`:
 - Inherits from `Metamodel::ProjectionHOW`
 - Composes `Sourcing::Aggregation` role
 - Works with `handled-events-map` to discover events
+
+---
+
+### Metamodel::SagaHOW
+
+**Purpose**: Metaclass for saga classes. Extends `AggregationHOW` and composes the `Sourcing::Saga` role.
+
+**Location**: `lib/Metamodel/SagaHOW.rakumod`
+
+**Public Methods**:
+```raku
+method compose(Mu $saga, |)
+# Composes saga:
+# 1. Calls parent compose (adds Projection + Aggregation roles)
+# 2. Adds Sourcing::Saga role
+# 3. Discovers aggregation-typed attributes (attributes whose type does Sourcing::Aggregation)
+# 4. Generates SagaCreated event class with nullable ID fields for each aggregation attribute
+# 5. Generates SagaAggregationBound event class
+# 6. Overrides attribute accessors for aggregation binding:
+#    - Read: returns the current value (loaded via sourcing on first write)
+#    - Write: emits SagaAggregationBound event, then sets the value
+# 7. Validates state names: collects all --> 'state-name' return values from apply
+#    methods and verifies that is on-state() guards only reference known states
+# 8. Wraps all methods with exception handling: any uncaught exception triggers
+#    rollback() and transitions to 'failed' state
+
+method update($saga)
+# Incremental update (inherited from ProjectionHOW):
+# 1. Gets cached last-id and data from the store
+# 2. Restores cached attribute values (including $.state and other saga attributes)
+# 3. For already-consumed events: replays with $*SourcingReplay = True (commands skipped)
+# 4. For new events: replays with $*SourcingReplay = False (commands run)
+# 5. Updates $.state from the return value of each apply() call
+# 6. Stores updated cache
+```
+
+**Automatic Aggregation Binding**:
+For an attribute `has Order $.order;` where Order is an aggregation:
+
+- During compose, SagaHOW detects that Order does `Sourcing::Aggregation`
+- Generates a write-intercepting accessor that:
+  - Emits `SagaAggregationBound` event with the attribute name, type, and projection IDs
+  - Sets the attribute value directly (bypassing the accessor on subsequent reads)
+- During replay of `SagaAggregationBound`, the saga loads the aggregation via `sourcing()`
+- This enables direct method calls: `$!order.withdraw: 100`
+
+**Timeout Infrastructure**:
+SagaHOW auto-generates `apply` methods for the internal timeout events:
+
+- `apply(TimeOutScheduled $e)` — rebuilds `%!timeout-handlers` and `@!timeout-schedule` from the persisted event
+- `apply(TimedOut $e)` — gets the handler-name from `$.handler-name`, looks it up in `%!timeout-handlers`, and dispatches to it
+
+The external scheduler must periodically call `verify-timeouts()` on each active saga instance.
+
+**State Validation**:
+- At compose time, collects all `--> 'state-name'` return values from apply methods
+- Validates that `is on-state()` guards on command methods reference only known states
+- Throws at compile time if an unknown state is referenced
+
+**Interactions**:
+- Inherits from `Metamodel::AggregationHOW`
+- Composes `Sourcing::Saga` role
+- Works with `Sourcing::Saga` to provide exception-based compensation
+
+---
 
 ---
 
@@ -756,14 +1088,12 @@ method use(|c)
 ### Dynamic Variables
 
 ```raku
-$*SourcingConfig
-# The active plugin instance, set by Plugin.use
-# Used throughout the library for event storage and retrieval
-
-$*SourcingReplay
-# When truthy, suppresses event emission from auto-generated methods
-# Set this to True when replaying events to prevent double-emission
-# Example: my $*SourcingReplay = True;
+ $*SourcingReplay
+ # When truthy, suppresses command execution entirely (returns Nil).
+ # Set during ^rebuild and during replay of already-consumed saga events.
+ # Commands that see $*SourcingReplay skip their entire body — no validation,
+ # no event emission, no side effects.
+ # Example: my $*SourcingReplay = True;
 ```
 
 ---
@@ -968,6 +1298,71 @@ aggregation MyAggregation {
 2. Adds both `Sourcing::Projection` and `Sourcing::Aggregation` roles
 3. Generates command methods: `my-event(:$value)` creates `MyEvent` and emits it
 
+### Declaring a Saga
+
+```raku
+use Sourcing;
+
+saga MySaga {
+    has Str     $.saga-id is projection-id;
+    has Str     $.state = 'pending';
+    has Order    $.order;       # Aggregation-typed attribute
+    has Customer $.customer;     # Late binding via $!customer .= new: :id(42)
+
+    # State transitions via apply() return types
+    multi method apply(OrderRequested $e --> 'creating') {
+        $!customer = sourcing Customer, :id($e.customer-id);
+        $.order-created: :customer-id($e.customer-id), :total($e.total);
+    }
+
+    multi method apply(OrderCreated $e --> 'credit-reserving') {
+        $!order = sourcing Order, :id($e.order-id);
+        $!customer.reserve-credit: :amount($e.total);
+        self.register-compensation: OrderCancelled.new(:order-id($e.order-id));
+    }
+
+    multi method apply(CreditReserved $e --> 'completed') { }
+
+    # State-guarded command
+    method cancel() is on-state(none <completed rolled-back>) is command {
+        self.rollback;
+        'rolled-back'
+    }
+}
+```
+
+**What happens**:
+1. `saga` constant triggers `Metamodel::SagaHOW` (extends AggregationHOW)
+2. Adds `Sourcing::Projection`, `Sourcing::Aggregation`, and `Sourcing::Saga` roles
+3. Validates that all `is on-state()` guards reference known states
+4. Generates `apply` handlers for internal events: `TimeOutScheduled`, `TimedOut`, `SagaCreated`, `SagaAggregationBound`
+5. Discovers aggregation-typed attributes and generates binding accessors
+6. Wraps all methods with exception handling for automatic compensation
+
+### The `is on-state()` Trait
+
+The `is on-state()` trait guards command execution to specific saga states. It prevents commands from running when the saga is in an invalid state.
+
+```raku
+method cancel() is on-state('pending') is command { ... }
+method retry() is on-state('pending' | 'failed') is command { ... }
+method expire() is on-state(none <completed rolled-back>) is command { ... }
+method process() is on-state(any <pending processing>) is command { ... }
+```
+
+**Supported forms**:
+
+| Form | Example | Description |
+|---|---|---|
+| Single string | `'pending'` | Only in the named state |
+| Junction (any) | `'pending' \| 'processing'` | In any of the listed states |
+| Junction (none) | `none <completed rolled-back>` | In none of the listed states |
+| Junction (all) | `all <ready processing>` | In all listed states (uncommon) |
+
+The trait uses Raku's smartmatch operator (`~~`) to check the current state against the guard.
+
+**Validation**: At compose time, `SagaHOW` validates that all `is on-state()` guards reference states declared in `apply` method return types. Unknown state names cause a compile-time error.
+
 ### Projection ID Mapping
 
 Default mapping (event field = projection ID name):
@@ -1035,15 +1430,14 @@ Every `is command` method follows this exact flow:
 
 ```
 Command called
-    │
-    ▼
+     │
+     ▼
 ┌─────────────────────────────────┐
-│ 1. ^update: Reset + Replay      │
-│    • Reset all mutable attrs    │
-│      to their defaults          │
-│    • Replay ALL events from     │
-│      the store onto the agg     │
-│    • Aggregate is now fresh     │
+│ 1. ^update: Incremental Update  │
+│    • Restore cached state        │
+│    • Apply only NEW events       │
+│    • For sagas: skip commands   │
+│      on already-consumed events  │
 └──────────────┬──────────────────┘
                │
                ▼
@@ -1051,7 +1445,9 @@ Command called
 │ 2. Execute command body         │
 │    • Validate against state     │
 │    • die() if validation fails  │
-│    • Emit events via $.event    │
+│    • Emit events via $.event   │
+│    • For sagas: exception      │
+│      triggers rollback + failed │
 └──────────────┬──────────────────┘
                │
                ▼
@@ -1059,21 +1455,21 @@ Command called
 │ 3. Optimistic lock check        │
 │    • Store detects if new       │
 │      events appeared since      │
-│      the ^update call           │
-│    • Throws X::OptimisticLocked  │
-│      if contention detected     │
+│      the ^update call          │
+│    • Throws X::OptimisticLocked │
+│      if contention detected    │
 └──────────────┬──────────────────┘
                │
-         ┌──────┴──────┐
-         │             │
-    Success         Contention
-         │             │
-         ▼             ▼
-    Return result   Retry (up to 5x)
-                    Go to step 1
-                    │
-                    ▼ (all retries exhausted)
-              Throw X::OptimisticLocked
+          ┌──────┴──────┐
+          │             │
+     Success         Contention
+          │             │
+          ▼             ▼
+     Return result   Retry (up to 5x)
+                     Go to step 1
+                     │
+                     ▼ (all retries exhausted)
+               Throw X::OptimisticLocked
 ```
 
 #### Automatic Retry Behavior
@@ -1603,6 +1999,7 @@ state before retrying.
 | `lib/Sourcing.rakumod`                          | Main module, exports traits, sourcing function |
 | `lib/Sourcing/Projection.rakumod`               | Role for all projections                       |
 | `lib/Sourcing/Aggregation.rakumod`              | Role marker for aggregations                   |
+| `lib/Sourcing/Saga.rakumod`                     | Role for all sagas (state, compensations, timeouts) |
 | `lib/Sourcing/ProjectionId.rakumod`             | Role for projection ID attributes              |
 | `lib/Sourcing/ProjectionIdMap.rakumod`          | Role for method ID mapping                     |
 | `lib/Sourcing/ProjectionStorage.rakumod`        | Registry projection                            |
@@ -1610,9 +2007,10 @@ state before retrying.
 | `lib/Sourcing/Plugin/Memory.rakumod`            | In-memory plugin implementation                |
 | `lib/Sourcing/X/OptimisticLocked.rakumod`        | Optimistic locking exception                   |
 | `lib/Metamodel/ProjectionHOW.rakumod`           | Metaclass for projections                      |
-| `lib/Metamodel/AggregationHOW.rakumod`          | Metaclass for aggregations                     |
-| `lib/Metamodel/ProjectionIdContainer.rakumod`   | ID introspection role                          |
-| `lib/Metamodel/EventHandlerContainer.rakumod`   | Event handler introspection role               |
+| `lib/Metamodel/AggregationHOW.rakumod`           | Metaclass for aggregations                    |
+| `lib/Metamodel/SagaHOW.rakumod`                 | Metaclass for sagas                           |
+| `lib/Metamodel/ProjectionIdContainer.rakumod`    | ID introspection role                         |
+| `lib/Metamodel/EventHandlerContainer.rakumod`   | Event handler introspection role              |
 
 ---
 
@@ -1627,9 +2025,10 @@ state before retrying.
 | `t/06-emit-and-get.rakutest` | Sourcing function, update, caching |
 | `t/07-projection-storage.rakutest` | ProjectionStorage registry, auto-update |
 | `t/08-accounts.rakutest` | Full account aggregate example |
-| `t/09-update.rakutest` | Command methods with auto-update |
+| `t/09-update.rakumod` | Command methods with incremental `^update` |
 | `t/10-optimistic-locking.rakutest` | Optimistic locking: direct emit, version checking, command retry |
 | `t/11-examples.rakutest` | Example modules (BankAccount, ShoppingCart, TodoList) |
 | `t/12-command-retry.rakutest` | Command retry: happy path, single retry, non-locking exceptions, state correctness |
 | `t/13-projection-read-only.rakutest` | Projection read-only enforcement: projections cannot emit, aggregations can |
 | `t/14-integration.rakutest` | Full CQRS integration: order lifecycle, validation, multiple aggregates, projections |
+| `t/15-saga.rakutest` | Saga: state machine, compensations, timeouts, aggregation binding, replay behavior, exception handling |
