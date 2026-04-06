@@ -6,6 +6,7 @@
   "build-depends": [
   ],
   "depends": [
+    "DBIish"
   ],
   "description": "Event sourcing library for Raku",
   "license": "Artistic-2.0",

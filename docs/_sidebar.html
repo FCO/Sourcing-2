@@ -1,0 +1,86 @@
+<!-- Sourcing Documentation Sidebar - include this in every page after <body> -->
+<style>
+#sidebar { position: fixed; top: 0; left: 0; width: 280px; height: 100vh; background: #161b22; border-right: 1px solid #30363d; overflow-y: auto; padding: 24px 0; z-index: 100; box-sizing: border-box; }
+#sidebar * { box-sizing: border-box; }
+#sidebar .header { padding: 0 20px 20px; border-bottom: 1px solid #30363d; margin-bottom: 16px; }
+#sidebar .header h1 { font-size: 20px; font-weight: 600; color: #e6edf3; margin: 0; }
+#sidebar .header h1 a { color: inherit; text-decoration: none; }
+#sidebar .header p { font-size: 12px; color: #8b949e; margin: 4px 0 0; }
+#sidebar .header p a { color: #8b949e; }
+#sidebar .group { padding: 0 12px; margin-bottom: 16px; }
+#sidebar .group-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #8b949e; margin-bottom: 8px; padding: 0 8px; }
+#sidebar a { display: block; padding: 6px 12px; color: #8b949e; text-decoration: none; font-size: 14px; border-radius: 6px; margin-bottom: 2px; transition: all 0.15s; }
+#sidebar a:hover { background: #30363d; color: #e6edf3; }
+#sidebar a.active { background: #1f6feb; color: #e6edf3; }
+@media (max-width: 768px) {
+    #sidebar { transform: translateX(-100%); transition: transform 0.3s; }
+    #sidebar.open { transform: translateX(0); }
+    .main { margin-left: 0 !important; }
+}
+.menu-toggle { display: none; position: fixed; top: 10px; left: 10px; z-index: 200; background: #161b22; border: 1px solid #30363d; color: #e6edf3; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+@media (max-width: 768px) { .menu-toggle { display: block; } }
+</style>
+<button class="menu-toggle" onclick="document.getElementById('sidebar').classList.toggle('open')">☰</button>
+<nav id="sidebar">
+    <div class="header">
+        <h1><a href="index.html">Sourcing</a></h1>
+        <p>Event Sourcing for Raku</p>
+        <p><a href="https://github.com/FCO/Sourcing-2">📦 GitHub</a></p>
+    </div>
+    <div class="group">
+        <div class="group-title">Getting Started</div>
+        <a href="index.html">Home</a>
+        <a href="concepts/event-sourcing.html">What is Event Sourcing?</a>
+        <a href="concepts/cqrs.html">CQRS Pattern</a>
+        <a href="concepts/architecture.html">Architecture</a>
+    </div>
+    <div class="group">
+        <div class="group-title">Core Concepts</div>
+        <a href="concepts/projections.html">Projections</a>
+        <a href="concepts/aggregations.html">Aggregations</a>
+        <a href="concepts/saga.html">Sagas</a>
+        <a href="concepts/commands.html">Commands</a>
+        <a href="concepts/optimistic-locking.html">Optimistic Locking</a>
+        <a href="concepts/events.html">Events</a>
+    </div>
+    <div class="group">
+        <div class="group-title">API Reference</div>
+        <a href="api/sourcing.html">sourcing()</a>
+        <a href="api/projection.html">Sourcing::Projection</a>
+        <a href="api/aggregation.html">Sourcing::Aggregation</a>
+        <a href="api/saga.html">Sourcing::Saga</a>
+        <a href="api/plugin.html">Sourcing::Plugin</a>
+        <a href="api/event-store.html">EventStore Interface</a>
+        <a href="api/state-cache.html">StateCache Interface</a>
+        <a href="api/event-store-memory.html">EventStore::Memory</a>
+        <a href="api/state-cache-memory.html">StateCache::Memory</a>
+        <a href="api/event-store-sqlite.html">EventStore::SQLite</a>
+        <a href="api/state-cache-sqlite.html">StateCache::SQLite</a>
+        <a href="api/memory.html">Plugin::Memory (Combined)</a>
+        <a href="api/projection-storage.html">ProjectionStorage</a>
+        <a href="api/metaclasses.html">Metaclasses</a>
+        <a href="api/traits.html">Traits</a>
+        <a href="api/exceptions.html">Exceptions</a>
+    </div>
+    <div class="group">
+        <div class="group-title">Guides</div>
+        <a href="guides/quick-start.html">Quick Start</a>
+        <a href="guides/bank-account.html">Bank Account Example</a>
+        <a href="guides/shopping-cart.html">Shopping Cart Example</a>
+        <a href="guides/projections.html">Building Projections</a>
+        <a href="guides/plugins.html">Writing a Plugin</a>
+        <a href="guides/irc-bot.html">IRC Bot Example</a>
+    </div>
+</nav>
+<script>
+(function() {
+    var path = window.location.pathname;
+    var links = document.querySelectorAll('#sidebar a');
+    links.forEach(function(link) {
+        var href = link.getAttribute('href');
+        if (path.endsWith(href) || (href === 'index.html' && (path.endsWith('/') || path === ''))) {
+            link.classList.add('active');
+        }
+    });
+})();
+</script>

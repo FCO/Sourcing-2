@@ -90,19 +90,22 @@ A hash mapping event types to their identity attribute mappings.
 =end pod
 
 method handled-events-map(Mu $proj) {
-	$!events-handled-map //= Hash[Mu, Mu].new: do for applies $proj -> &candidate {
-		my $param = &candidate.signature.params.skip.head;
-		next if $param.named;
+	$!events-handled-map //= do {
+		my %map{Mu:U} = ();
+		for applies $proj -> &candidate {
+			my $param = &candidate.signature.params.skip.head;
+			next if $param.named;
 
-		my %map := &candidate.?projection-id-map // %();
-		my %funcs = %map.kv.map: -> $k, $v {
-			$k => $v
+			my %funcs := &candidate.?projection-id-map // %();
+			my $event-type = $param.type;
+			my %mapping = %(
+				|$proj.^projection-ids.map: -> $attr {
+					my $method = $attr.name.substr: 2;
+					$method => %funcs{$method} // $method
+				}
+			);
+			%map{$event-type} = %mapping;
 		}
-		$param.type => %(
-			|$proj.^projection-ids.map: -> $attr {
-				my $method = $attr.name.substr: 2;
-				$method => %funcs{$method} // $method
-			}
-		)
+		%map
 	}
 }

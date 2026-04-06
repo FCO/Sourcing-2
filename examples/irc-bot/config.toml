@@ -1,0 +1,15 @@
+# IRC Bot Configuration - Simple Key=Value Format
+
+nickname = sourcing-bot
+server = irc.libera.chat
+port = 6697
+username = sourcing-bot
+realname = Sourcing IRC Bot
+channels = #raku,#sourcing
+
+karma-enabled = true
+karma-min = -1000
+karma-max = 1000
+alias-enabled = true
+
+verbose = false

@@ -124,14 +124,10 @@ sub get-events(@events, %ids, %map) {
 	@events.grep: -> $event {
 		next unless $event.WHAT ~~ %map.keys.any;
 		my $event-type = $event.WHAT;
-		do if %map{$event-type} {
-			my %event-map := %map{$event-type};
-			[&&] do for %ids.kv -> $key, $value {
-				my $event-key = %event-map{$key};
-				$event."$event-key"() ~~ $value
-			}
-		} else {
-			True
+		my %event-map := %map{$event-type};
+		[&&] do for %ids.kv -> $key, $value {
+			my $event-key = %event-map{$key};
+			$event."$event-key"() ~~ $value
 		}
 	}
 }

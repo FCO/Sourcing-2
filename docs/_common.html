@@ -1,0 +1,76 @@
+<!-- Common CSS for all Sourcing docs -->
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--text-muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff;--code-bg:#1a1e24;--font-mono:'SF Mono','Fira Code',monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}html{scroll-behavior:smooth}body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.7;font-size:16px}.main{margin-left:280px;padding:40px 60px;max-width:900px}@media(max-width:768px){.main{margin-left:0;padding:20px}}h1{font-size:36px;font-weight:700;margin-bottom:16px}h2{font-size:24px;font-weight:600;margin:32px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--border)}h3{font-size:18px;font-weight:600;margin:24px 0 12px}p{margin-bottom:16px;color:var(--text-muted)}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}code{font-family:var(--font-mono);background:var(--code-bg);padding:2px 6px;border-radius:4px;font-size:14px}pre{background:var(--code-bg);padding:16px;border-radius:8px;overflow-x:auto;margin:16px 0}pre code{background:none;padding:0}ul,ol{margin:16px 0;padding-left:24px;color:var(--text-muted)}li{margin-bottom:8px}.callout{padding:16px;border-radius:8px;margin:16px 0}.callout.info{background:rgba(88,166,255,0.1);border-left:4px solid var(--accent)}.callout.success{background:rgba(63,185,80,0.1);border-left:4px solid var(--green)}.callout.tip{background:rgba(63,185,80,0.1);border-left:4px solid var(--green)}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{padding:12px;text-align:left;border-bottom:1px solid var(--border)}th{color:var(--text);font-weight:600}
+</style>
+
+<!-- Common sidebar for all Sourcing docs -->
+<style>
+.sidebar{position:fixed;top:0;left:0;width:280px;height:100vh;background:var(--surface);border-right:1px solid var(--border);overflow-y:auto;padding:24px 0;z-index:100}.sidebar-header{padding:0 20px 20px;border-bottom:1px solid var(--border);margin-bottom:16px}.sidebar-title{font-size:20px;font-weight:600;color:var(--text)}.sidebar-title a{color:inherit;text-decoration:none}.sidebar-header p{font-size:12px;color:var(--text-muted);margin-top:4px}.sidebar-group{padding:0 12px;margin-bottom:16px}.sidebar-group-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);margin-bottom:8px;padding:0 8px}.sidebar a{display:block;padding:6px 12px;color:var(--text-muted);text-decoration:none;font-size:14px;border-radius:6px;margin-bottom:2px;transition:all 0.15s}.sidebar a:hover{background:var(--border);color:var(--text)}.sidebar a.active{background:var(--accent-dim);color:var(--text)}@media(max-width:768px){.sidebar{transform:translateX(-100%)}.sidebar.open{transform:translateX(0)}.main{margin-left:0}}.menu-toggle{display:none;position:fixed;top:10px;left:10px;z-index:200;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;cursor:pointer}@media(max-width:768px){.menu-toggle{display:block}}
+</style>
+
+<button class="menu-toggle" onclick="document.getElementById('sidebar').classList.toggle('open')">☰</button>
+
+<nav class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+        <div class="sidebar-title"><a href="index.html">Sourcing</a></div>
+        <p>Event Sourcing for Raku</p>
+        <p style="margin-top:8px"><a href="https://github.com/FCO/Sourcing-2" style="color:var(--text-muted);font-size:12px">📦 GitHub Repo</a></p>
+    </div>
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">Getting Started</div>
+        <a href="index.html">Home</a>
+        <a href="concepts/event-sourcing.html">What is Event Sourcing?</a>
+        <a href="concepts/cqrs.html">CQRS Pattern</a>
+        <a href="concepts/architecture.html">Architecture</a>
+    </div>
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">Core Concepts</div>
+        <a href="concepts/projections.html">Projections</a>
+        <a href="concepts/aggregations.html">Aggregations</a>
+        <a href="concepts/saga.html">Sagas</a>
+        <a href="concepts/commands.html">Commands</a>
+        <a href="concepts/optimistic-locking.html">Optimistic Locking</a>
+        <a href="concepts/events.html">Events</a>
+    </div>
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">API Reference</div>
+        <a href="api/sourcing.html">sourcing()</a>
+        <a href="api/projection.html">Sourcing::Projection</a>
+        <a href="api/aggregation.html">Sourcing::Aggregation</a>
+        <a href="api/saga.html">Sourcing::Saga</a>
+        <a href="api/plugin.html">Sourcing::Plugin</a>
+        <a href="api/event-store.html">EventStore</a>
+        <a href="api/state-cache.html">StateCache</a>
+        <a href="api/event-store-memory.html">EventStore::Memory</a>
+        <a href="api/state-cache-memory.html">StateCache::Memory</a>
+        <a href="api/event-store-sqlite.html">EventStore::SQLite</a>
+        <a href="api/state-cache-sqlite.html">StateCache::SQLite</a>
+        <a href="api/memory.html">Plugin::Memory</a>
+        <a href="api/projection-storage.html">ProjectionStorage</a>
+        <a href="api/metaclasses.html">Metaclasses</a>
+        <a href="api/traits.html">Traits</a>
+        <a href="api/exceptions.html">Exceptions</a>
+    </div>
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">Guides</div>
+        <a href="guides/quick-start.html">Quick Start</a>
+        <a href="guides/bank-account.html">Bank Account</a>
+        <a href="guides/shopping-cart.html">Shopping Cart</a>
+        <a href="guides/projections.html">Building Projections</a>
+        <a href="guides/plugins.html">Writing a Plugin</a>
+        <a href="guides/irc-bot.html">IRC Bot Example</a>
+    </div>
+</nav>
+
+<script>
+(function() {
+    var path = window.location.pathname;
+    var links = document.querySelectorAll('#sidebar a');
+    links.forEach(function(link) {
+        var href = link.getAttribute('href');
+        if (path.endsWith(href) || (href === 'index.html' && (path.endsWith('/') || path === ''))) {
+            link.classList.add('active');
+        }
+    });
+})();
+</script>

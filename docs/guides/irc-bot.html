@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IRC Bot Example — Sourcing</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --bg: #0d1117; --surface: #161b22; --border: #30363d;
+            --text: #e6edf3; --text-muted: #8b949e; --accent: #58a6ff;
+            --accent-dim: #1f6feb; --green: #3fb950; --orange: #d29922;
+            --red: #f85149; --purple: #bc8cff; --code-bg: #1a1e24;
+            --font-mono: 'SF Mono', 'Fira Code', monospace;
+            --font-sans: -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+        html { scroll-behavior: smooth; }
+        body { font-family: var(--font-sans); background: var(--bg); color: var(--text); line-height: 1.7; font-size: 16px; }
+        .sidebar { position: fixed; top: 0; left: 0; width: 280px; height: 100vh; background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; padding: 24px 0; z-index: 100; }
+        .sidebar-header { padding: 0 20px 20px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+        .sidebar-title { font-size: 20px; font-weight: 600; color: var(--text); }
+        .sidebar-group { padding: 0 12px; margin-bottom: 20px; }
+        .sidebar-group-title { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; padding: 0 8px; }
+        .sidebar a { display: block; padding: 8px 12px; color: var(--text-muted); text-decoration: none; border-radius: 6px; margin-bottom: 2px; font-size: 14px; transition: all 0.15s; }
+        .sidebar a:hover { background: var(--border); color: var(--text); }
+        .sidebar a.active { background: var(--accent-dim); color: var(--text); }
+        .main { margin-left: 280px; padding: 40px 60px; max-width: 900px; }
+        .hero { margin-bottom: 40px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+        h1 { font-size: 36px; font-weight: 700; margin-bottom: 12px; }
+        h2 { font-size: 24px; font-weight: 600; margin: 32px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+        h3 { font-size: 18px; font-weight: 600; margin: 24px 0 12px; }
+        p { margin-bottom: 16px; color: var(--text-muted); }
+        code { font-family: var(--font-mono); background: var(--code-bg); padding: 2px 6px; border-radius: 4px; font-size: 14px; }
+        pre { background: var(--code-bg); padding: 16px; border-radius: 8px; overflow-x: auto; margin: 16px 0; }
+        pre code { background: none; padding: 0; }
+        ul, ol { margin: 16px 0; padding-left: 24px; color: var(--text-muted); }
+        li { margin-bottom: 8px; }
+        .callout { padding: 16px; border-radius: 8px; margin: 16px 0; }
+        .callout.info { background: rgba(88, 166, 255, 0.1); border-left: 4px solid var(--accent); }
+        .callout.success { background: rgba(63, 185, 80, 0.1); border-left: 4px solid var(--green); }
+        table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); }
+        th { color: var(--text); font-weight: 600; }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+    <link rel="stylesheet" href="../_sidebar.css">
+</head>
+<body>
+    <main class="main">
+        <div class="hero">
+            <h1>IRC Bot Example</h1>
+            <p>A real-world example demonstrating event sourcing with an IRC bot using karma tracking, projections, and the Memory plugin.</p>
+        </div>
+
+        <h2>Overview</h2>
+        <p>This example shows how to build an IRC bot using Sourcing's event sourcing patterns. The bot connects to an IRC server, joins channels, and tracks user karma using projections.</p>
+
+        <div class="callout info">
+            <strong>Features demonstrated:</strong>
+            <ul style="margin: 8px 0 0 16px;">
+                <li>Sourcing::Plugin::Memory for event storage</li>
+                <li>Projections for read-optimized views</li>
+                <li>IRC::Client integration</li>
+                <li>Command handling via event emission</li>
+            </ul>
+        </div>
+
+        <h2>Project Structure</h2>
+        <pre><code>examples/irc-bot/
+├── bin/
+│   └── irc-bot.raku          # Main executable
+├── lib/
+│   └── Sourcing/
+│       └── Example/
+│           └── IRCBot/        # Domain modules
+├── config.toml                # Bot configuration
+└── t/
+    └── 01-irc-bot.rakutest   # Tests</code></pre>
+
+        <h2>Configuration</h2>
+        <p>The bot is configured via <code>config.toml</code>:</p>
+        <pre><code>nickname = sourcing-bot
+server = irc.libera.chat
+port = 6697
+channels = #raku,#sourcing
+
+karma-enabled = true
+karma-min = -1000
+karma-max = 1000</code></pre>
+
+        <h2>Running the Bot</h2>
+        <pre><code>raku -I. examples/irc-bot/bin/irc-bot.raku</code></pre>
+
+        <h2>Commands</h2>
+        <table>
+            <tr><th>Command</th><th>Description</th></tr>
+            <tr><td><code>++username</code></td><td>Increase user's karma by 1</td></tr>
+            <tr><td><code>--username</code></td><td>Decrease user's karma by 1</td></tr>
+            <tr><td><code>!karma [user]</code></td><td>Show karma for a user</td></tr>
+            <tr><td><code>!help</code></td><td>Show available commands</td></tr>
+        </table>
+
+        <h2>How It Works</h2>
+        
+        <h3>Events</h3>
+        <p>When a user types <code>++username</code>, the bot emits a <code>KarmaIncreased</code> event:</p>
+        <pre><code>my $e = KarmaIncreased.new(
+    :$target,
+    :changed-by($event.nick),
+    :amount(1),
+    :changed-at(DateTime.now)
+);
+$*SourcingConfig.emit: $e, :type(KarmaProjection), :ids({target => $target});</code></pre>
+
+        <h3>Projections</h3>
+        <p>The <code>KarmaProjection</code> builds a read-optimized view of user karma:</p>
+        <pre><code>projection KarmaProjection {
+    has Str $.target is projection-id;
+    has Int $.karma = 0;
+    
+    multi method apply(KarmaIncreased $e) {
+        $!karma += $e.amount;
+    }
+    
+    multi method apply(KarmaDecreased $e) {
+        $!karma -= $e.amount;
+    }
+}</code></pre>
+
+        <h3>Querying Karma</h3>
+        <p>To get a user's current karma, use the <code>sourcing</code> function:</p>
+        <pre><code>my $karma = sourcing KarmaProjection, :target($username);
+say $karma.karma;  # Current karma score</code></pre>
+
+        <h2>Testing</h2>
+        <p>Run the tests:</p>
+        <pre><code>mi6 test t/01-irc-bot.rakutest</code></pre>
+
+        <h2>Extending the Bot</h2>
+        <p>To add new features:</p>
+        <ol>
+            <li>Define new event classes in <code>irc-bot.raku</code></li>
+            <li>Create projections to build read models</li>
+            <li>Add command handlers in the plugin</li>
+        </ol>
+
+        <h2>See Also</h2>
+        <ul>
+            <li><a href="concepts/projections.html">Projections</a> - Read-optimized views</li>
+            <li><a href="guides/plugins.html">Writing a Plugin</a> - Custom storage backends</li>
+            <li><a href="api/projection.html">Projection API</a></li>
+        </ul>
+    </main>
+    <script src="../_sidebar.js"></script>
+</body>
+</html>
