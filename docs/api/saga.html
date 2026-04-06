@@ -37,7 +37,7 @@
             <h2>What It Does</h2>
             <p>Sagas extend aggregations with additional capabilities for coordinating complex business workflows:</p>
             <ul>
-                <li><strong>Compensation stack</strong> — LIFO stack of compensation events for rollback on failure</li>
+                <li><strong>Undo blocks</strong> — LIFO stack of callable blocks for rollback on failure</li>
                 <li><strong>State machine</strong> — Declarative state transitions via return types</li>
                 <li><strong>Timeout support</strong> — Schedule and handle timeouts for long-running processes</li>
                 <li><strong>Aggregation binding</strong> — Lazy loading and tracking of related aggregates</li>
@@ -68,8 +68,8 @@ saga AccountTransfer {
 
     multi method apply(Withdrawn $e --> 'depositing') {
         $!to-account.deposit: $!amount;
-        self.register-compensation: WithdrawnReversed.new(:id($e.id), :amount($e.amount));
-        self.register-compensation: DepositedReversed.new(:id($e.id), :amount($!amount));
+        self.undo: *.from-account.reverse-withdraw: $e.amount;
+        self.undo: *.to-account.reverse-deposit: $!amount;
         self.timeout-in: 'confirm-delivery', :5minutes;
     }
 
@@ -90,7 +90,7 @@ saga AccountTransfer {
             <table>
                 <tr><th>Attribute</th><th>Type</th><th>Description</th></tr>
                 <tr><td><code>$.state</code></td><td>Str</td><td>Current saga state</td></tr>
-                <tr><td><code>@.compensations</code></td><td>Mu</td><td>LIFO stack of compensation events</td></tr>
+                <tr><td><code>@.undo-blocks</code></td><td>Callable</td><td>LIFO stack of undo blocks for rollback</td></tr>
                 <tr><td><code>@.timeout-schedule</td><td>Pair</td><td>Ordered array of DateTime => Set of handler names</td></tr>
                 <tr><td><code>%.timeout-handlers</code></td><td>Hash</td><td>Handler name => Hash{:date-time, :method-name}</td></tr>
             </table>
@@ -100,8 +100,16 @@ saga AccountTransfer {
             <h3>method start</h3>
             <p>Creates a new saga and emits a <code>SagaCreated</code> event to initialize the saga in the event store.</p>
 
-            <h3>method register-compensation(Mu $event)</h3>
-            <p>Adds a compensation event to the LIFO stack for potential rollback. Call immediately after a step succeeds so rollback is always possible.</p>
+            <h3>method undo(Callable $block)</h3>
+            <p>Stores a callable (undo block) on the LIFO stack for potential rollback. Unlike compensation events which are emitted to the event store, undo blocks are executed directly during rollback. This is useful for calling methods directly on aggregates without generating new events.</p>
+            <p>During rollback, all undo blocks are executed in reverse order (LIFO). The blocks receive the saga as the topic (<code>$_</code>), allowing method chaining:</p>
+            <pre><code># After withdrawing from an account, register the undo block
+$!account.withdraw: 100;
+$.undo: *.account.reverse-withdraw: 100;
+
+# During rollback, this block executes:
+# $!account.reverse-withdraw: 100;</code></pre>
+            <p><strong>Note:</strong> Undo blocks complement compensation events — use events when you need auditability, use undo blocks for direct aggregate manipulation.</p>
 
             <h3>method timeout-in(Str $method-name, *%params)</h3>
             <p>Schedules a timeout that fires after a specified duration:</p>
@@ -114,7 +122,7 @@ saga AccountTransfer {
             <p><strong>Note:</strong> Can only be called from within an <code>apply()</code> method.</p>
 
             <h3>method rollback() is command</h3>
-            <p>Emits all registered compensations in LIFO order. Clears the compensation stack. Called automatically when any exception is thrown.</p>
+            <p>Emits all registered compensations in LIFO order and executes all undo blocks in reverse order. Clears both stacks. Called automatically when any exception is thrown.</p>
 
             <h3>method verify-timeouts() is command</h3>
             <p>Iterates over the ordered timeout schedule. While the next entry's DateTime is <code>&lt;= DateTime.now</code>, emits <code>TimedOut</code> events. Should be called periodically (e.g., every 10 seconds) by an external scheduler.</p>

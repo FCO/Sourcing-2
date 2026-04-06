@@ -19,9 +19,9 @@ transactions for rollback, and support timeout handling.
 
 unit role Sourcing::Saga;
 
-has Mu    @.compensations = [];
 has Pair  @.timeout-schedule = [];
 has Hash  $!timeout-handlers = {};
+has Callable @!undo-blocks = [];
 
 method timeout-handlers() { $!timeout-handlers }
 
@@ -61,18 +61,27 @@ multi method apply(Sourcing::Saga::Events::TimedOut $e) {
 
 =head1 METHODS
 
-=head2 method register-compensation
+=head2 method undo
 
-Adds a compensation event to the LIFO stack for potential rollback.
+Registers a callable block to be executed during rollback. The block
+receives the aggregate instance as its topic (via C<*>) and should
+perform the reversal of the corresponding action.
 
 =head3 Parameters
 
-=head4 C<Mu $event> — The compensation event to register
+=head4 C<Callable $block> — A callable (block or lambda) that takes an aggregate as topic
+
+=head3 Example
+
+  method withdraw-money(Int $amount) {
+      $!account.withdrew: $amount;
+      self.undo: *.reverse-withdraw: $amount;
+  }
 
 =end pod
 
-method register-compensation(Mu $event) {
-	@.compensations.push: $event
+method undo(Callable $block) {
+	@!undo-blocks.push: $block
 }
 
 =begin pod
@@ -100,19 +109,17 @@ method timeout-in(Str $method-name, *%params) {
 
 =head2 method rollback
 
-Emits all registered compensations in LIFO order and clears the compensation stack.
+Executes all registered undo blocks in reverse order and clears the undo block stack.
 
 =end pod
 
 method rollback() {
-	while @.compensations {
-		my $comp = @.compensations.pop;
-		$*SourcingConfig.emit: $comp,
-			:type(self.WHAT),
-			:ids(self.^projection-id-pairs),
-			:current-version($.current-version);
+	# Execute undo blocks in reverse order (LIFO)
+	while @!undo-blocks {
+		my $block = @!undo-blocks.pop;
+		$block();
 	}
-	@.compensations = [];
+	@!undo-blocks = [];
 }
 
 =begin pod

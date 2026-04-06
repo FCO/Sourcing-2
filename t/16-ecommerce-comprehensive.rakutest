@@ -1,0 +1,822 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+use Sourcing::X::OptimisticLocked;
+
+=begin pod
+
+=head1 NAME
+
+Sourcing::Example::Tests - Comprehensive tests for Sourcing concepts
+
+=head1 DESCRIPTION
+
+Tests that demonstrate all Sourcing concepts:
+- Aggregations with commands
+- Projections for read models
+- Sagas for multi-step transactions
+- Optimistic locking
+- Command retry patterns
+
+=end pod
+
+# Initialize the event store
+Sourcing::Plugin::Memory.use;
+
+#=====================================================================
+# SECTION 1: Event Definitions
+#=====================================================================
+
+# Order Events
+class OrderCreated {
+    has Str $.order-id;
+    has Str $.customer-id;
+    has DateTime $.created-at;
+    has Int $.item-count = 0;
+    has Numeric $.total = 0;
+    has Str $.status = 'pending';
+}
+
+class OrderItemAdded {
+    has Str $.order-id;
+    has Str $.item-id;
+    has Int $.quantity;
+    has Numeric $.unit-price;
+}
+
+class OrderSubmitted {
+    has Str $.order-id;
+    has DateTime $.submitted-at;
+}
+
+class OrderCancelled {
+    has Str $.order-id;
+    has Str $.reason;
+    has DateTime $.cancelled-at;
+}
+
+class OrderCompleted {
+    has Str $.order-id;
+    has DateTime $.completed-at;
+}
+
+# Inventory Events
+class InventoryAdjusted {
+    has Str $.item-id;
+    has Int $.quantity-change;
+    has Str $.reason;
+    has DateTime $.adjusted-at;
+}
+
+class InventoryReserved {
+    has Str $.order-id;
+    has Str $.item-id;
+    has Int $.quantity;
+    has DateTime $.reserved-at;
+}
+
+class InventoryReleased {
+    has Str $.order-id;
+    has Str $.item-id;
+    has Int $.quantity;
+    has DateTime $.released-at;
+}
+
+# Payment Events
+class PaymentInitiated {
+    has Str $.payment-id;
+    has Str $.order-id;
+    has Numeric $.amount;
+    has Str $.method;
+    has Str $.status = 'pending';
+}
+
+class PaymentAuthorized {
+    has Str $.payment-id;
+    has Str $.authorization-code;
+    has DateTime $.authorized-at;
+}
+
+class PaymentCaptured {
+    has Str $.payment-id;
+    has Numeric $.captured-amount;
+    has DateTime $.captured-at;
+}
+
+class PaymentRefunded {
+    has Str $.payment-id;
+    has Numeric $.refunded-amount;
+    has Str $.reason;
+    has DateTime $.refunded-at;
+}
+
+#=====================================================================
+# SECTION 2: Aggregates
+#=====================================================================
+
+# Order Aggregate - simplified without hash attribute
+aggregation OrderAggregate {
+    has Str $.order-id is projection-id;
+    has Str $.customer-id;
+    has Int $.item-count = 0;
+    has Numeric $.total = 0;
+    has Str $.status = 'created';
+    has DateTime $.created-at = DateTime.now;
+    has DateTime $.submitted-at;
+    has DateTime $.cancelled-at;
+    has DateTime $.completed-at;
+    has Str $.cancellation-reason;
+
+    multi method apply(OrderCreated $e) {
+        $!order-id = $e.order-id;
+        $!customer-id = $e.customer-id;
+        $!created-at = $e.created-at // DateTime.now;
+        $!item-count = $e.item-count;
+        $!total = $e.total;
+        $!status = $e.status // 'pending';
+    }
+
+    multi method apply(OrderItemAdded $e) {
+        die "Cannot add items to order in status: $!status" unless $!status eq 'pending';
+        $!item-count++;
+        $!total += $e.quantity * $e.unit-price;
+    }
+
+    multi method apply(OrderSubmitted $e) {
+        die "Cannot submit order in status: $!status" unless $!status eq 'pending';
+        $!status = 'submitted';
+        $!submitted-at = $e.submitted-at // DateTime.now;
+    }
+
+    multi method apply(OrderCancelled $e) {
+        die "Cannot cancel order in status: $!status" unless $!status eq 'pending' | 'submitted';
+        $!status = 'cancelled';
+        $!cancelled-at = $e.cancelled-at // DateTime.now;
+        $!cancellation-reason = $e.reason;
+    }
+
+    multi method apply(OrderCompleted $e) {
+        die "Cannot complete order in status: $!status" unless $!status eq 'submitted';
+        $!status = 'completed';
+        $!completed-at = $e.completed-at // DateTime.now;
+    }
+
+    method create-order(Str :$customer-id, Int :$item-count = 0, Numeric :$total = 0) {
+        self.order-created(
+            :order-id($!order-id),
+            :$customer-id,
+            :created-at(DateTime.now),
+            :$item-count,
+            :$total
+        );
+    }
+
+    method add-item(Str :$item-id, Int :$quantity, Numeric :$unit-price) {
+        die "Order must be in pending status to add items" unless $!status eq 'pending';
+        self.order-item-added(:$!order-id, :$item-id, :$quantity, :$unit-price);
+    }
+
+    method submit() {
+        die "Order must be pending to submit" unless $!status eq 'pending';
+        die "Order must have at least one item" unless $!item-count > 0;
+        self.order-submitted(:order-id($!order-id), :submitted-at(DateTime.now));
+    }
+
+    method cancel(Str :$reason) {
+        die "Cannot cancel order in status: $!status" unless $!status eq 'pending' | 'submitted';
+        self.order-cancelled(:order-id($!order-id), :$reason, :cancelled-at(DateTime.now));
+    }
+
+    method complete() {
+        die "Can only complete submitted orders" unless $!status eq 'submitted';
+        self.order-completed(:order-id($!order-id), :completed-at(DateTime.now));
+    }
+}
+
+# Inventory Aggregate
+aggregation InventoryAggregate {
+    has Str $.item-id is projection-id;
+    has Int $.available = 0;
+    has Int $.reserved = 0;
+    has Int $.total = 0;
+    has Int $.reservation-count = 0;
+
+    multi method apply(InventoryAdjusted $e) {
+        $!item-id = $e.item-id;
+        $!total += $e.quantity-change;
+        $!available = $!total - $!reserved;
+    }
+
+    multi method apply(InventoryReserved $e) {
+        die "Insufficient inventory for item $!item-id" if $!available < $e.quantity;
+        $!reserved += $e.quantity;
+        $!reservation-count++;
+        $!available = $!total - $!reserved;
+    }
+
+    multi method apply(InventoryReleased $e) {
+        $!reserved -= $e.quantity;
+        $!reservation-count--;
+        $!available = $!total - $!reserved;
+    }
+
+    method total-available() { $!available }
+
+    method reserve(Str :$order-id, Int :$quantity) {
+        die "Insufficient inventory. Available: $!available, Requested: $quantity" if $!available < $quantity;
+        self.inventory-reserved(:$order-id, :item-id($!item-id), :$quantity, :reserved-at(DateTime.now));
+    }
+
+    method release(Str :$order-id) {
+        die "No reservation found for order $order-id" unless $!reservation-count > 0;
+        # Release all reserved for this order (simplified)
+        self.inventory-released(:$order-id, :item-id($!item-id), :quantity($!available < $!total ?? $!total - $!available !! 0), :released-at(DateTime.now));
+    }
+
+    method adjust(Int :$quantity-change, Str :$reason) {
+        self.inventory-adjusted(:item-id($!item-id), :$quantity-change, :$reason, :adjusted-at(DateTime.now));
+    }
+}
+
+# Payment Aggregate
+aggregation PaymentAggregate {
+    has Str $.payment-id is projection-id;
+    has Str $.order-id;
+    has Numeric $.amount = 0;
+    has Str $.method;
+    has Str $.status = 'initiated';
+    has Str $.authorization-code;
+    has DateTime $.authorized-at;
+    has DateTime $.captured-at;
+    has Numeric $.captured-amount = 0;
+    has Numeric $.refunded-amount = 0;
+    has Str $.failure-reason;
+
+    multi method apply(PaymentInitiated $e) {
+        $!payment-id = $e.payment-id;
+        $!order-id = $e.order-id;
+        $!amount = $e.amount;
+        $!method = $e.method;
+        $!status = $e.status // 'pending';
+    }
+
+    multi method apply(PaymentAuthorized $e) {
+        die "Payment must be pending to authorize" unless $!status eq 'pending';
+        $!status = 'authorized';
+        $!authorization-code = $e.authorization-code;
+        $!authorized-at = $e.authorized-at // DateTime.now;
+    }
+
+    multi method apply(PaymentCaptured $e) {
+        die "Payment must be authorized to capture" unless $!status eq 'authorized';
+        $!status = 'captured';
+        $!captured-amount = $e.captured-amount // $!amount;
+        $!captured-at = $e.captured-at // DateTime.now;
+    }
+
+    multi method apply(PaymentRefunded $e) {
+        die "Payment must be captured to refund" unless $!status eq 'captured';
+        $!refunded-amount += $e.refunded-amount // ($!captured-amount - $!refunded-amount);
+        if $!refunded-amount >= $!captured-amount {
+            $!status = 'refunded';
+        }
+    }
+
+    method initiate(Str :$order-id, Numeric :$amount, Str :$method) {
+        $!amount = $amount;
+        $!method = $method;
+        $!order-id = $order-id;
+        self.payment-initiated(:$!payment-id, :$order-id, :$amount, :$method);
+    }
+
+    method authorize(Str :$authorization-code) {
+        die "Payment must be pending to authorize" unless $!status eq 'pending';
+        self.payment-authorized(:$!payment-id, :$authorization-code, :authorized-at(DateTime.now));
+    }
+
+    method capture(Numeric :$captured-amount = $!amount) {
+        die "Payment must be authorized to capture" unless $!status eq 'authorized';
+        self.payment-captured(:$!payment-id, captured-amount => $captured-amount, :captured-at(DateTime.now));
+    }
+
+    method refund(Numeric :$refunded-amount, Str :$reason) {
+        die "Payment must be captured to refund" unless $!status eq 'captured';
+        die "Refund amount exceeds captured amount" if $refunded-amount > ($!captured-amount - $!refunded-amount);
+        self.payment-refunded(:$!payment-id, :$refunded-amount, :$reason, :refunded-at(DateTime.now));
+    }
+}
+
+#=====================================================================
+# SECTION 3: Projections
+#=====================================================================
+
+# Order Projection - can use hashes in projections
+projection OrderProjection {
+    has Str $.order-id is projection-id;
+    has Str $.customer-id;
+    has Int $.item-count = 0;
+    has Numeric $.total = 0;
+    has Str $.status = 'created';
+    has DateTime $.created-at;
+    has DateTime $.submitted-at;
+    has DateTime $.cancelled-at;
+    has DateTime $.completed-at;
+    has Str $.cancellation-reason;
+
+    multi method apply(OrderCreated $e) {
+        $!order-id = $e.order-id;
+        $!customer-id = $e.customer-id;
+        $!created-at = $e.created-at // DateTime.now;
+        $!item-count = $e.item-count;
+        $!total = $e.total;
+        $!status = $e.status // 'pending';
+    }
+
+    multi method apply(OrderItemAdded $e) {
+        $!item-count++;
+        $!total += $e.quantity * $e.unit-price;
+    }
+
+    multi method apply(OrderSubmitted $e) {
+        $!status = 'submitted';
+        $!submitted-at = $e.submitted-at // DateTime.now;
+    }
+
+    multi method apply(OrderCancelled $e) {
+        $!status = 'cancelled';
+        $!cancelled-at = $e.cancelled-at // DateTime.now;
+        $!cancellation-reason = $e.reason;
+    }
+
+    multi method apply(OrderCompleted $e) {
+        $!status = 'completed';
+        $!completed-at = $e.completed-at // DateTime.now;
+    }
+}
+
+# Inventory Projection
+projection InventoryProjection {
+    has Str $.item-id is projection-id;
+    has Int $.available = 0;
+    has Int $.reserved = 0;
+    has Int $.total = 0;
+    has Int $.reservation-count = 0;
+
+    multi method apply(InventoryAdjusted $e) {
+        $!item-id = $e.item-id;
+        $!total += $e.quantity-change;
+        $!available = $!total - $!reserved;
+    }
+
+    multi method apply(InventoryReserved $e) {
+        $!reserved += $e.quantity;
+        $!reservation-count++;
+        $!available = $!total - $!reserved;
+    }
+
+    multi method apply(InventoryReleased $e) {
+        $!reserved -= $e.quantity;
+        $!reservation-count--;
+        $!available = $!total - $!reserved;
+    }
+}
+
+# Payment Projection
+projection PaymentProjection {
+    has Str $.payment-id is projection-id;
+    has Str $.order-id;
+    has Numeric $.amount = 0;
+    has Str $.method;
+    has Str $.status = 'initiated';
+    has Str $.authorization-code;
+    has DateTime $.authorized-at;
+    has DateTime $.captured-at;
+    has Numeric $.captured-amount = 0;
+    has Numeric $.refunded-amount = 0;
+
+    multi method apply(PaymentInitiated $e) {
+        $!payment-id = $e.payment-id;
+        $!order-id = $e.order-id;
+        $!amount = $e.amount;
+        $!method = $e.method;
+        $!status = $e.status // 'pending';
+    }
+
+    multi method apply(PaymentAuthorized $e) {
+        $!status = 'authorized';
+        $!authorization-code = $e.authorization-code;
+        $!authorized-at = $e.authorized-at // DateTime.now;
+    }
+
+    multi method apply(PaymentCaptured $e) {
+        $!status = 'captured';
+        $!captured-amount = $e.captured-amount // $!amount;
+        $!captured-at = $e.captured-at // DateTime.now;
+    }
+
+    multi method apply(PaymentRefunded $e) {
+        $!refunded-amount += $e.refunded-amount // ($!captured-amount - $!refunded-amount);
+        if $!refunded-amount >= $!captured-amount {
+            $!status = 'refunded';
+        }
+    }
+}
+
+#=====================================================================
+# SECTION 4: Tests
+#=====================================================================
+
+# Test 1: Create an order aggregate and emit events
+subtest 'Order Aggregate - Basic Create and Submit' => {
+    my $order = OrderAggregate.new: :order-id<ORD-001>;
+    
+    # Create order
+    $order.create-order: :customer-id<CUST-001>, :item-count(1), :total(29.99);
+    $order.^update;
+    
+    is $order.status, 'pending', 'Order created with pending status';
+    is $order.customer-id, 'CUST-001', 'Customer ID set correctly';
+    is $order.total, 29.99, 'Total calculated correctly';
+    
+    # Add item
+    $order.add-item: :item-id<ITEM-B>, :quantity(1), :unit-price(49.99);
+    $order.^update;
+    
+    is $order.item-count, 2, 'Item count incremented';
+    is $order.total, 79.98, 'Total updated after adding item (29.99 + 49.99)';
+    
+    # Submit order
+    $order.submit;
+    $order.^update;
+    
+    is $order.status, 'submitted', 'Order submitted successfully';
+    ok $order.submitted-at.defined, 'Submitted timestamp set';
+    
+    # Complete order
+    $order.complete;
+    $order.^update;
+    
+    is $order.status, 'completed', 'Order completed successfully';
+    
+    pass 'Order aggregate works correctly';
+}
+
+# Test 2: Read via projection
+subtest 'Order Projection - Read Model' => {
+    # Create order via aggregate
+    my $order = OrderAggregate.new: :order-id<ORD-002>;
+    $order.create-order: :customer-id<CUST-002>, :item-count(1), :total(10.00);
+    $order.^update;
+    $order.add-item: :item-id<ITEM-Y>, :quantity(2), :unit-price(15.00);
+    $order.^update;
+    $order.submit;
+    $order.^update;
+    
+    # Read via projection
+    my $view = sourcing OrderProjection, :order-id<ORD-002>;
+    
+    is $view.order-id, 'ORD-002', 'Order ID matches';
+    is $view.customer-id, 'CUST-002', 'Customer ID matches';
+    is $view.status, 'submitted', 'Status matches aggregate';
+    is $view.total, 40.00, 'Total matches (10 + 2*15 = 40)';
+    is $view.item-count, 2, 'Item count matches';
+    
+    pass 'Order projection works correctly';
+}
+
+# Test 3: Inventory aggregate
+subtest 'Inventory Aggregate - Reserve and Release' => {
+    # Create inventory with stock
+    my $inventory = InventoryAggregate.new: :item-id<ITEM-001>;
+    $inventory.adjust: :quantity-change(100), :reason('Initial stock');
+    $inventory.^update;
+    
+    is $inventory.total, 100, 'Initial stock set';
+    is $inventory.total-available, 100, 'All stock available';
+    
+    # Reserve inventory
+    $inventory.reserve: :order-id<ORD-001>, :quantity(30);
+    $inventory.^update;
+    
+    is $inventory.total-available, 70, 'Available reduced after reservation';
+    is $inventory.reserved, 30, 'Reserved quantity correct';
+    
+    # Release inventory
+    $inventory.release: :order-id<ORD-001>;
+    $inventory.^update;
+    
+    is $inventory.total-available, 100, 'Stock restored after release';
+    is $inventory.reserved, 0, 'Reserved cleared';
+    
+    pass 'Inventory aggregate works correctly';
+}
+
+# Test 4: Inventory projection
+subtest 'Inventory Projection - Read Model' => {
+    # Set up inventory with multiple reservations
+    my $inventory = InventoryAggregate.new: :item-id<INV-PROJ-001>;
+    $inventory.adjust: :quantity-change(50), :reason('Initial');
+    $inventory.^update;
+    $inventory.reserve: :order-id<ORD-001>, :quantity(10);
+    $inventory.^update;
+    $inventory.reserve: :order-id<ORD-002>, :quantity(15);
+    $inventory.^update;
+    
+    # Read via projection
+    my $view = sourcing InventoryProjection, :item-id<INV-PROJ-001>;
+    
+    is $view.total, 50, 'Total matches';
+    is $view.reserved, 25, 'Total reserved (10 + 15)';
+    is $view.available, 25, 'Available = total - reserved';
+    
+    pass 'Inventory projection works correctly';
+}
+
+# Test 5: Payment aggregate - full lifecycle
+subtest 'Payment Aggregate - Full Lifecycle' => {
+    my $payment = PaymentAggregate.new: :payment-id<PAY-001>;
+    
+    # Initiate
+    $payment.initiate: :order-id<ORD-001>, :amount(100.00), :method<credit-card>;
+    $payment.^update;
+    
+    is $payment.status, 'pending', 'Payment initiated with pending status';
+    is $payment.amount, 100.00, 'Amount set correctly';
+    
+    # Authorize
+    $payment.authorize: :authorization-code<AUTH-123>;
+    $payment.^update;
+    
+    is $payment.status, 'authorized', 'Payment authorized';
+    is $payment.authorization-code, 'AUTH-123', 'Authorization code stored';
+    
+    # Capture
+    $payment.capture;
+    $payment.^update;
+    
+    is $payment.status, 'captured', 'Payment captured';
+    is $payment.captured-amount, 100.00, 'Full amount captured';
+    
+    # Refund
+    $payment.refund: :refunded-amount(50.00), :reason('Partial return');
+    $payment.^update;
+    
+    is $payment.status, 'captured', 'Still captured after partial refund';
+    is $payment.refunded-amount, 50.00, 'Partial refund recorded';
+    
+    # Full refund
+    $payment.refund: :refunded-amount(50.00), :reason('Remaining return');
+    $payment.^update;
+    
+    is $payment.status, 'refunded', 'Fully refunded';
+    
+    pass 'Payment aggregate works correctly';
+}
+
+# Test 6: Payment projection
+subtest 'Payment Projection - Read Model' => {
+    # Create payment lifecycle
+    my $payment = PaymentAggregate.new: :payment-id<PAY-002>;
+    $payment.initiate: :order-id<ORD-002>, :amount(250.00), :method<debit>;
+    $payment.^update;
+    $payment.authorize: :authorization-code<DEB-456>;
+    $payment.^update;
+    $payment.capture: :captured-amount(250.00);
+    $payment.^update;
+    
+    # Read via projection
+    my $view = sourcing PaymentProjection, :payment-id<PAY-002>;
+    
+    is $view.payment-id, 'PAY-002', 'Payment ID matches';
+    is $view.order-id, 'ORD-002', 'Order ID matches';
+    is $view.amount, 250.00, 'Amount matches';
+    is $view.method, 'debit', 'Method matches';
+    is $view.status, 'captured', 'Status matches aggregate';
+    is $view.authorization-code, 'DEB-456', 'Authorization code matches';
+    is $view.captured-amount, 250.00, 'Captured amount matches';
+    
+    pass 'Payment projection works correctly';
+}
+
+# Test 7: Order cancellation
+subtest 'Order Aggregate - Cancellation' => {
+    my $order = OrderAggregate.new: :order-id<ORD-CANCEL>;
+    $order.create-order: :customer-id<CUST-CANCEL>, :item-count(1), :total(100.00);
+    $order.^update;
+    $order.submit;
+    $order.^update;
+    
+    is $order.status, 'submitted', 'Order submitted before cancel';
+    
+    $order.cancel: :reason('Customer request');
+    $order.^update;
+    
+    is $order.status, 'cancelled', 'Order cancelled';
+    is $order.cancellation-reason, 'Customer request', 'Cancellation reason stored';
+    ok $order.cancelled-at.defined, 'Cancellation timestamp set';
+    
+    pass 'Order cancellation works correctly';
+}
+
+# Test 8: Optimistic locking with concurrent modification
+subtest 'Optimistic Locking - Concurrent Modification Detection' => {
+    my $memory = $*SourcingConfig;
+    
+    # Create an aggregate and emit some events
+    my $order = OrderAggregate.new: :order-id<ORD-OPT>;
+    $order.create-order: :customer-id<CUST-OPT>, :item-count(0), :total(0);
+    $order.^update;
+    
+    # Get current version from store
+    my %cached := $memory.get-cached-data: OrderAggregate, {order-id => 'ORD-OPT'};
+    my $current-version = %cached<last-id>;
+    
+    # Simulate concurrent modification by emitting directly with version
+    my $concurrent-event = OrderItemAdded.new(
+        :order-id<ORD-OPT>,
+        :item-id<CONCURRENT-ITEM>,
+        :quantity(1),
+        :unit-price(99.99)
+    );
+    
+    # This should succeed with the current version
+    lives-ok {
+        $memory.emit($concurrent-event, :type(OrderAggregate), :ids({order-id => 'ORD-OPT'}), :$current-version)
+    }, 'Direct emit succeeds with correct version';
+    
+    # Now simulate stale version - another modification happened
+    my %cached2 := $memory.get-cached-data: OrderAggregate, {order-id => 'ORD-OPT'};
+    my $new-version = %cached2<last-id>;
+    
+    # Try to emit with old version - should fail
+    my $stale-event = OrderItemAdded.new(
+        :order-id<ORD-OPT>,
+        :item-id<STALE-ITEM>,
+        :quantity(1),
+        :unit-price(10.00)
+    );
+    
+    throws-like {
+        $memory.emit($stale-event, :type(OrderAggregate), :ids({order-id => 'ORD-OPT'}), :current-version($current-version))
+    }, Sourcing::X::OptimisticLocked, 'Stale version throws OptimisticLocked';
+    
+    pass 'Optimistic locking works correctly';
+}
+
+# Test 9: Command with automatic retry
+subtest 'Command Retry - Automatic Version Refresh' => {
+    my $counter = 0;
+    
+    # Define aggregate with command that modifies state
+    class CounterEvent {
+        has UInt $.id;
+        has Int $.delta;
+    }
+    
+    aggregation RetryCounter {
+        has UInt $.id is projection-id;
+        has Int $.count = 0;
+        
+        multi method apply(CounterEvent $e) {
+            $!count += $e.delta;
+            $counter = $!count;
+        }
+        
+        method increment(Int $amount) is command {
+            $.counter-event: :delta($amount)
+        }
+    }
+    
+    # Create initial state
+    my $c = sourcing RetryCounter, :id(1);
+    $c.increment: 10;
+    $c.^update;
+    is $counter, 10, 'First increment works';
+    
+    # Simulate concurrent modification
+    my $memory = $*SourcingConfig;
+    my %cached := $memory.get-cached-data: RetryCounter, {id => 1};
+    my $version = %cached<last-id>;
+    
+    my $concurrent-event = CounterEvent.new(:id(1), :delta(5));
+    $memory.emit($concurrent-event, :type(RetryCounter), :ids({id => 1}), :$version);
+    
+    # The next command should detect the conflict and retry
+    $c.increment: 20;
+    $c.^update;
+    
+    # After retry and refresh, should have the concurrent change + new change
+    is $counter, 35, 'Command succeeded after retry with fresh version (10 + 5 + 20 = 35)';
+    
+    pass 'Command retry works correctly';
+}
+
+# Test 10: Sourcing function - basic usage
+subtest 'Sourcing Function - Get Projection' => {
+    # Create some events via Order aggregate
+    my $order = OrderAggregate.new: :order-id<SOURCE-TEST>;
+    $order.create-order: :customer-id<CUST-1>, :item-count(1), :total(50.00);
+    $order.^update;
+    
+    # Use sourcing() to get a fresh projection
+    my $projected = sourcing OrderProjection, :order-id<SOURCE-TEST>;
+    
+    is $projected.order-id, 'SOURCE-TEST', 'Projection ID matches';
+    is $projected.customer-id, 'CUST-1', 'Customer ID matches';
+    is $projected.total, 50.00, 'Total matches';
+    
+    pass 'Sourcing function works correctly';
+}
+
+# Test 13: End-to-end order fulfillment workflow
+subtest 'End-to-End - Complete Order Fulfillment' => {
+    # Step 1: Set up inventory for items
+    my $inv-a = InventoryAggregate.new: :item-id<EA-ITEM-A>;
+    $inv-a.adjust: :quantity-change(100), :reason('Initial stock');
+    $inv-a.^update;
+    
+    my $inv-b = InventoryAggregate.new: :item-id<EA-ITEM-B>;
+    $inv-b.adjust: :quantity-change(50), :reason('Initial stock');
+    $inv-b.^update;
+    
+    # Step 2: Create and submit order
+    my $order = OrderAggregate.new: :order-id<EA-ORD-001>;
+    $order.create-order: :customer-id<EA-CUST-001>, :item-count(2), :total(100.00);
+    $order.^update;
+    $order.submit;
+    $order.^update;
+    is $order.status, 'submitted', 'Order submitted';
+    
+    # Step 3: Reserve inventory
+    $inv-a.reserve: :order-id<EA-ORD-001>, :quantity(2);
+    $inv-a.^update;
+    
+    $inv-b.reserve: :order-id<EA-ORD-001>, :quantity(1);
+    $inv-b.^update;
+    
+    # Step 4: Process payment
+    my $payment = PaymentAggregate.new: :payment-id<EA-PAY-001>;
+    $payment.initiate: :order-id<EA-ORD-001>, :amount(100.00), :method<credit-card>;
+    $payment.^update;
+    
+    $payment.authorize: :authorization-code<AUTH-E2E>;
+    $payment.^update;
+    
+    $payment.capture;
+    $payment.^update;
+    
+    is $payment.status, 'captured', 'Payment captured';
+    
+    # Step 5: Complete order
+    $order.complete;
+    $order.^update;
+    
+    is $order.status, 'completed', 'Order completed';
+    
+    # Step 6: Verify via projections
+    my $order-view = sourcing OrderProjection, :order-id<EA-ORD-001>;
+    my $inv-a-view = sourcing InventoryProjection, :item-id<EA-ITEM-A>;
+    my $inv-b-view = sourcing InventoryProjection, :item-id<EA-ITEM-B>;
+    my $pay-view = sourcing PaymentProjection, :payment-id<EA-PAY-001>;
+    
+    is $order-view.status, 'completed', 'Order view shows completed';
+    is $order-view.total, 100.00, 'Order view shows correct total';
+    is $inv-a-view.reserved, 2, 'Item A has 2 reserved';
+    is $inv-b-view.reserved, 1, 'Item B has 1 reserved';
+    is $pay-view.status, 'captured', 'Payment view shows captured';
+    
+    pass 'End-to-end workflow completed successfully';
+}
+
+# Test 14: Verify event store contains all emitted events
+subtest 'Event Store - Verify All Events Stored' => {
+    my $memory = $*SourcingConfig;
+    my $initial-count = $memory.events.elems;
+    
+    # Create various events
+    my $order = OrderAggregate.new: :order-id<STORE-TEST-001>;
+    $order.create-order: :customer-id<CUST-STORE>, :item-count(0), :total(0);
+    $order.^update;
+    
+    my $inventory = InventoryAggregate.new: :item-id<STORE-INV>;
+    $inventory.adjust: :quantity-change(10), :reason('test');
+    $inventory.^update;
+    
+    my $payment = PaymentAggregate.new: :payment-id<STORE-PAY>;
+    $payment.initiate: :order-id<STORE-ORD>, :amount(50), :method<test>;
+    $payment.^update;
+    
+    # Verify events were stored
+    my $final-count = $memory.events.elems;
+    my $new-events = $final-count - $initial-count;
+    
+    ok $new-events >= 3, "At least 3 new events stored (got $new-events)";
+    
+    pass 'Event store works correctly';
+}
+
+#=====================================================================
+# Final: Run all tests
+#=====================================================================
+
+done-testing;

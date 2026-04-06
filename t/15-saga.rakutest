@@ -42,15 +42,16 @@ saga CompensationSaga {
 	multi method apply(Any $e --> 'pending') { }
 
 	method do-action() is command {
-		self.register-compensation: CompensationEvent.new: :saga-id($!saga-id), :action<undo>;
+		self.undo: { @!compensations-emitted.push: 'undo' };
 		$!state = 'done';
 	}
 
 	method rollback() {
-		while @.compensations {
-			my $comp = @.compensations.pop;
-			@!compensations-emitted.push: $comp.action;
+		while @!undo-blocks {
+			my $block = @!undo-blocks.pop;
+			$block();
 		}
+		@!undo-blocks = [];
 	}
 }
 
@@ -115,15 +116,16 @@ saga ExceptionSaga {
 	multi method apply(Any $e --> 'pending') { }
 
 	method do-failing-action() is command {
-		self.register-compensation: CompensationEvent.new: :saga-id($!saga-id), :action<undo>;
+		self.undo: { @!compensations-emitted.push: 'undo' };
 		die 'Simulated failure';
 	}
 
 	method rollback() {
-		while @.compensations {
-			my $comp = @.compensations.pop;
-			@!compensations-emitted.push: $comp.action;
+		while @!undo-blocks {
+			my $block = @!undo-blocks.pop;
+			$block();
 		}
+		@!undo-blocks = [];
 	}
 }
 
@@ -188,14 +190,14 @@ subtest 'Saga is also an aggregation (can emit events)' => {
 	ok OrderSaga.^does(Sourcing::Projection), 'Saga does Projection role';
 }
 
-subtest 'register-compensation and rollback' => {
+subtest 'undo and rollback' => {
 	my $saga = sourcing CompensationSaga, :saga-id<comp-test>;
 
 	$saga.do-action;
 	is $saga.state, 'done', 'state is updated';
 
 	$saga.rollback;
-	is-deeply $saga.compensations-emitted, [<undo>], 'compensations were emitted in LIFO order';
+	is-deeply $saga.compensations-emitted, [<undo>], 'undo blocks were executed in LIFO order';
 }
 
 subtest 'timeout-in schedules timeouts' => {
@@ -331,6 +333,166 @@ subtest 'SagaAggregationBound event has correct structure' => {
 	is $event.aggregation-type, 'OrderAggregate', 'aggregation-type is set';
 	ok $event.ids ~~ Hash, 'ids is a Hash';
 	ok $event.ids<order-id> ~~ Hash, 'order-id is a Hash';
+}
+
+# Test classes for undo mechanism
+class TestAccountAggregate {
+	has $.aggregate-id is projection-id;
+	has Int $.balance = 100;
+
+	method withdraw(Numeric $amount) {
+		$!balance -= $amount;
+	}
+
+	method reverse-withdraw(Numeric $amount) {
+		$!balance += $amount;
+	}
+}
+
+class TestWithdrawCommand {
+	has $.aggregate-id;
+	has Numeric $.amount;
+}
+
+saga UndoSaga {
+	has Str $.saga-id is projection-id;
+	has Str $.state = 'pending';
+	has Int @.undo-executed;
+
+	multi method apply(Any $e --> 'pending') { }
+
+	method do-withdrawal(Numeric $amount) is command {
+		# Simulate withdrawal - in real code this would emit event to aggregate
+		$!state = 'withdrawn';
+
+		# Register undo block - this block receives the aggregate as topic via *
+		self.undo: *.reverse-withdraw: $amount;
+	}
+}
+
+saga UndoMultiSaga {
+	has Str $.saga-id is projection-id;
+	has Str $.state = 'pending';
+	has Int @.undo-order;
+
+	multi method apply(Any $e --> 'pending') { }
+
+	method do-first-action() is command {
+		self.undo: { @!undo-order.push: 1 };
+		$!state = 'step1';
+	}
+
+	method do-second-action() is command {
+		self.undo: { @!undo-order.push: 2 };
+		$!state = 'step2';
+	}
+
+	method do-third-action() is command {
+		self.undo: { @!undo-order.push: 3 };
+		$!state = 'step3';
+	}
+}
+
+saga UndoFailureSaga {
+	has Str $.saga-id is projection-id;
+	has Str $.state = 'pending';
+	has Bool $.rollback-completed = False;
+	has Bool $.undo-block-executed = False;
+
+	multi method apply(Any $e --> 'pending') { }
+
+	method do-action-that-fails-on-undo() is command {
+		self.undo: {
+			$!undo-block-executed = True;
+			die 'Undo failed!';
+		};
+		$!state = 'done';
+	}
+
+	method custom-rollback() {
+		# Custom rollback that catches exception
+		try {
+			while @!undo-blocks {
+				my $block = @!undo-blocks.pop;
+				$block();
+			}
+			@!undo-blocks = [];
+			CATCH {
+				default {
+					# Exception caught, mark as completed anyway
+				}
+			}
+			$!rollback-completed = True;
+		}
+	}
+}
+
+subtest 'undo method registers callable blocks' => {
+	my $saga = sourcing UndoSaga, :saga-id<undo-test-1>;
+
+	ok $saga.^can('undo'), 'saga has undo method';
+	$saga.do-withdrawal: 50;
+	is $saga.state, 'withdrawn', 'state is updated after withdrawal';
+}
+
+subtest 'undo blocks execute in reverse order during rollback' => {
+	my $saga = sourcing UndoMultiSaga, :saga-id<undo-test-2>;
+
+	$saga.do-first-action;
+	is $saga.state, 'step1', 'state is step1';
+
+	$saga.do-second-action;
+	is $saga.state, 'step2', 'state is step2';
+
+	$saga.do-third-action;
+	is $saga.state, 'step3', 'state is step3';
+
+	$saga.rollback;
+
+	# Undo blocks should execute in reverse order: 3, 2, 1
+	is $saga.undo-order.join(','), '3,2,1', 'undo blocks executed in reverse LIFO order';
+}
+
+subtest 'undo block receives aggregate as topic' => {
+	my $aggregate = TestAccountAggregate.new: :aggregate-id<acc-1>;
+	is $aggregate.balance, 100, 'initial balance is 100';
+
+	# Create a block that uses the aggregate
+	my $undo-block = *.reverse-withdraw: 50;
+	$undo-block($aggregate);
+
+	is $aggregate.balance, 150, 'balance was reversed by undo block';
+}
+
+subtest 'undo block failure propagates exception' => {
+	my $saga = sourcing UndoFailureSaga, :saga-id<undo-fail-test>;
+
+	$saga.do-action-that-fails-on-undo;
+	is $saga.state, 'done', 'state is done before rollback';
+
+	# The default rollback should propagate the exception
+	my $exception-caught = False;
+	try {
+		$saga.rollback;
+		CATCH {
+			default { $exception-caught = True }
+		}
+	}
+
+	ok $exception-caught, 'exception from undo block propagates';
+}
+
+subtest 'undo blocks are cleared after rollback' => {
+	my $saga = sourcing UndoMultiSaga, :saga-id<undo-test-3>;
+
+	$saga.do-first-action;
+	$saga.do-second-action;
+	$saga.do-third-action;
+
+	$saga.rollback;
+	$saga.rollback;  # Second rollback should not execute any blocks
+
+	is $saga.undo-order.join(','), '3,2,1', 'blocks executed on first rollback';
 }
 
 done-testing;

@@ -72,7 +72,7 @@ saga OrderSaga {
     multi method apply(OrderCompleted $e --> 'completed') { }
 
     method cancel-order() is command {
-        self.register-compensation: OrderCancelled.new(:$!order-id);
+        self.undo: { self.send-command: Order, { :order-id($!order-id) }, CancelOrder.new };
     }
 
     method handle-timeout() {
@@ -96,32 +96,51 @@ multi method apply(PaymentConfirmed $e --> 'ready-to-ship') { } # State transiti
 }</code></pre>
 
             <h2>Compensation and Rollback</h2>
-            <p>When a step succeeds, register a compensation event that can undo it if a later step fails:</p>
+            <p>When a step succeeds, register an undo block that can reverse it if a later step fails:</p>
             <pre><code>multi method apply(PaymentProcessed $e --> 'paying') {
-    # Store the compensation immediately after the action succeeds
-    self.register-compensation: PaymentRefunded.new(
-        :order-id($!order-id),
-        :amount($e.amount)
-    );
+    # Store the undo block immediately after the action succeeds
+    self.undo: *.payment-refund: $e.amount;
 
     # Continue to next step
     self.send-command: Inventory, { :order-id($!order-id) }, InventoryReserved.new;
 }</code></pre>
             <p>If any exception occurs, the saga automatically:</p>
             <ol>
-                <li>Emits all registered compensations in <strong>LIFO order</strong> (last-in, first-out)</li>
-                <li>Clears the compensation stack</li>
+                <li>Executes all undo blocks in <strong>LIFO order</strong> (last-in, first-out)</li>
+                <li>Clears the undo block stack</li>
                 <li>Transitions to the <code>'failed'</code> state</li>
             </ol>
             <pre><code>method rollback() is command {
     # Automatically called on any unhandled exception
-    # Emits compensations in reverse order of registration
+    # Executes undo blocks in reverse order of registration
 }</code></pre>
 
             <div class="callout warning">
-                <div class="callout-title">Compensation Design</div>
-                <p>Always register compensation events <em>immediately after</em> a step succeeds. Don't wait — if an exception happens before you register, there's no way to undo that step!</p>
+                <div class="callout-title">Undo Block Design</div>
+                <p>Always register undo blocks <em>immediately after</em> a step succeeds. Don't wait — if an exception happens before you register, there's no way to undo that step!</p>
             </div>
+
+            <h3>Undo Blocks</h3>
+            <p>Instead of registering compensation events, you can register <strong>undo blocks</strong> — callables that execute directly during rollback. This is useful when you need to call methods on aggregates without generating new compensation events.</p>
+            <pre><code>multi method apply(TransferExecuted $e --> 'depositing') {
+    # Withdraw from source account
+    $!from-account.withdraw: $!amount;
+
+    # Register an undo block to reverse this action
+    # The block receives the saga as $_, enabling method chaining
+    $.undo: *.from-account.deposit: $!amount;
+}</code></pre>
+            <p>Undo blocks execute in LIFO order during rollback. They receive the saga instance as the topic, allowing concise method chaining:</p>
+            <pre><code>method rollback() is command {
+    # Executes all undo blocks in reverse order of registration
+}</code></pre>
+            <p>When to use undo blocks:</p>
+            <table>
+                <tr><th>When to Use</th><th>Example</th></tr>
+                <tr><td>Direct aggregate manipulation</td><td>Reversing a withdrawal directly</td></tr>
+                <tr><td>Simpler workflows</td><td>Cancelling an order by sending a command</td></tr>
+                <tr><td>When events aren't needed</td><td>Temporary state changes</td></tr>
+            </table>
 
             <h2>Timeout Handling</h2>
             <p>Long-running processes need timeouts to handle failure scenarios like a service going down. Sagas support scheduled timeouts:</p>
@@ -170,10 +189,10 @@ method cancel-if-no-payment() {
 
             <h2>Saga Design Rules</h2>
             <ul>
-                <li><strong>Design compensation first.</strong> For every step, ask: "if this fails later, how do we undo it?"</li>
-                <li><strong>Register compensation immediately.</strong> After each successful step, register its compensation before proceeding.</li>
+                <li><strong>Design undo blocks first.</strong> For every step, ask: "if this fails later, how do we undo it?"</li>
+                <li><strong>Register undo blocks immediately.</strong> After each successful step, register its undo block before proceeding.</li>
                 <li><strong>Keep sagas idempotent.</strong> Target aggregations should handle repeated commands gracefully.</li>
-                <li><strong>Use timeouts for critical paths.</strong> If a step takes too long, assume it failed and compensate.</li>
+                <li><strong>Use timeouts for critical paths.</strong> If a step takes too long, assume it failed and undo.</li>
                 <li><strong>Name states after user-facing outcomes.</strong> <code>'completed'</code>, <code>'cancelled'</code>, <code>'failed'</code></li>
             </ul>
 
@@ -200,18 +219,18 @@ saga CreateOrder {
     multi method apply(PaymentAuthorized $e --> 'reserving') {
         self.cancel-timeout: 'payment-timeout';
         self.send-command: Inventory, { :saga-id($!saga-id) }, Reserve.new(:items($e.items));
-        self.register-compensation: RefundPayment.new(:payment-id($e.payment-id));
+        self.undo: { self.send-command: Payment, { :saga-id($!saga-id) }, Refund.new(:payment-id($e.payment-id)) };
         self.timeout-in: 'inventory-timeout', :2minutes;
     }
 
     multi method apply(InventoryReserved $e --> 'shipping') {
         self.cancel-timeout: 'inventory-timeout';
         self.send-command: Shipping, { :saga-id($!saga-id) }, Ship.new(:address($e.address));
-        self.register-compensation: ReleaseInventory.new(:reservation-id($e.reservation-id));
+        self.undo: { self.send-command: Inventory, { :saga-id($!saga-id) }, Release.new(:reservation-id($e.reservation-id)) };
     }
 
     multi method apply(OrderShipped $e --> 'completed') {
-        self.register-compensation: CancelShipment.new(:tracking($e.tracking-number));
+        self.undo: { self.send-command: Shipping, { :saga-id($!saga-id) }, Cancel.new(:tracking($e.tracking-number)) };
     }
 
     method payment-timeout {
