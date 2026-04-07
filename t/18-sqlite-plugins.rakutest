@@ -15,6 +15,14 @@ unless $dbiish-available {
     exit;
 }
 
+# DBIish has known issues on Windows (access violations with SQLite)
+if $*KERNEL.name eq 'win32' {
+    plan 1;
+    skip "SQLite plugin tests skipped on Windows (DBIish has known access violation issues)", 1;
+    done-testing;
+    exit;
+}
+
 require Sourcing::Plugin::EventStore::SQLite;
 require Sourcing::Plugin::StateCache::SQLite;
 require Sourcing::ProjectionStorage;
