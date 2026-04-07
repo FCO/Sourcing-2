@@ -47,7 +47,7 @@ submethod TWEAK(|) {
 	# Load existing events and emit them to the supply
 	my $sth = $!dbh.execute('SELECT id, type, ids, data, timestamp FROM events ORDER BY id');
 	while my $row = $sth.row(:hash) {
-		$!event-id.atomic-fetch($row<id>);
+	$!event-id = $row<id>;
 		my $event = self!deserialize-event($row<type>, $row<data>);
 		$!supplier.emit: $event;
 	}
@@ -122,8 +122,10 @@ multi method emit($event) {
 		'INSERT INTO events (type, ids, data, timestamp) VALUES (?, ?, ?, ?)',
 		$type, '', $data, $timestamp
 	);
-	my $id = $!dbh.insert-id();
-	$!event-id.atomic-fetch($id);
+	my $sth = $!dbh.prepare('SELECT last_insert_rowid()');
+	$sth.execute;
+	my $id = $sth.allrows()[0][0];
+	$!event-id = $id;
 	$!supplier.emit: $event
 }
 
@@ -179,8 +181,8 @@ multi method emit($event, :$type, :%ids!, :$current-version!) {
 		'INSERT INTO events (type, ids, data, timestamp) VALUES (?, ?, ?, ?)',
 		$evt-type, $id-key, $data, $timestamp
 	);
-	my $id = $!dbh.insert-id();
-	$!event-id.atomic-fetch($id);
+	my $id = do { my $s = $!dbh.prepare('SELECT last_insert_rowid()'); $s.execute; $s.allrows()[0][0] };
+	$!event-id = $id;
 	$!supplier.emit: $event
 }
 
@@ -408,11 +410,8 @@ multi method store-cached-data(Mu:U $proj, %ids, %data, Int :$last-id!) {
 	my $id-key = %ids.sort.map({ .key ~ "\t" ~ .value }).join(";");
 	my $data-json = Rakudo::Internals::JSON.to-json(%data);
 
-	$!dbh.execute(q:to/STATEMENT/);
-		INSERT OR REPLACE INTO projection_cache (projection_type, id_key, data, last_id)
-		VALUES (?, ?, ?, ?)
-		STATEMENT
-		$proj.^name, $id-key, $data-json, $last-id;
+	my $stmt = $!dbh.prepare('INSERT OR REPLACE INTO projection_cache (projection_type, id_key, data, last_id) VALUES (?, ?, ?, ?)');
+	$stmt.execute($proj.^name, $id-key, $data-json, $last-id);
 }
 
 =begin pod

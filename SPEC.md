@@ -13,6 +13,7 @@ Sourcing is a Raku (Perl 6) event sourcing library that provides a declarative a
 7. [Traits and Declarations](#traits-and-declarations)
 8. [Storage System](#storage-system)
 9. [Usage Patterns](#usage-patterns)
+10. [IRC Bot Example](#irc-bot-example)
 
 ---
 
@@ -1949,6 +1950,425 @@ catches it and automatically retries (up to 5 attempts). If all 5 retries
 fail, the **last `X::OptimisticLocked` exception is re-thrown** to the caller.
 Non-command code that catches this exception should call `^update` to refresh
 state before retrying.
+
+---
+
+## IRC Bot Example
+
+This section documents a complete IRC bot implementation that demonstrates strict CQRS separation using the Sourcing library. The bot handles karma tracking (`nick++`/`nick--`), alias management (`nick => alias`), and query commands (`!karma`, `!aliases`).
+
+### Architecture Overview
+
+The IRC bot follows **strict CQRS**:
+
+| Side | Components | Responsibility |
+|------|-------------|-----------------|
+| **Command** (writes) | ChannelAggregation, KarmaAggregation, AliasAggregation | Receive commands, validate, emit events |
+| **Query** (reads) | KarmaProjection, AliasProjection | Store and serve query-optimized data |
+| **Orchestration** | KarmaHandler Saga, AliasHandler Saga | Consume events, parse patterns, dispatch to aggregations |
+
+**Key principle**: Aggregations emit events but **never** send IRC messages directly. Projections serve queries but **never** emit events. Sagas bridge the two sides.
+
+```mermaid
+flowchart TD
+    subgraph CommandSide["COMMAND SIDE (writes)"]
+        CA[ChannelAggregation<br/>receive-message<br/>→ MessageReceived]
+        KA[KarmaAggregation<br/>increment-karma<br/>decrement-karma<br/>→ KarmaIncreased/KarmaDecreased]
+        AA[AliasAggregation<br/>set-alias<br/>remove-alias<br/>→ AliasSet/AliasRemoved]
+    end
+
+    subgraph QuerySide["QUERY SIDE (reads)"]
+        KP[KarmaProjection<br/>!karma [nick]]
+        AP[AliasProjection<br/>!aliases [nick]]
+    end
+
+    subgraph Sagas["ORCHESTRATION"]
+        KH[KarmaHandler Saga<br/>consumes MessageReceived<br/>parses ++/--]
+        AH[AliasHandler Saga<br/>consumes MessageReceived<br/>parses =>]
+    end
+
+    subgraph Events["EVENT FLOW"]
+        MR[MessageReceived]
+        KI[KarmaIncreased/KarmaDecreased]
+        AI[AliasSet/AliasRemoved]
+    end
+
+    IRC[IRC Message] --> CA
+    CA --> MR
+    MR --> KH
+    MR --> AH
+    KH --> KA
+    AH --> AA
+    KA --> KI
+    AA --> AI
+    KI --> KP
+    AI --> AP
+
+    Q1[Query: !karma nick] --> KP
+    Q2[Query: !aliases nick] --> AP
+```
+
+### Event Definitions
+
+```raku
+# ─── Channel Events ───────────────────────────────────────────────
+class MessageReceived {
+    has Str $.channel;
+    has Str $.nick;
+    has Str $.message;
+}
+
+# ─── Karma Events ──────────────────────────────────────────────────
+class KarmaIncreased {
+    has Str $.channel;
+    has Str $.target-nick;
+    has Int $.amount;
+}
+
+class KarmaDecreased {
+    has Str $.channel;
+    has Str $.target-nick;
+    has Int $.amount;
+}
+
+# ─── Alias Events ───────────────────────────────────────────────────
+class AliasSet {
+    has Str $.channel;
+    has Str $.nick;
+    has Str $.alias;
+}
+
+class AliasRemoved {
+    has Str $.channel;
+    has Str $.nick;
+}
+```
+
+### Command Side (Aggregations)
+
+#### ChannelAggregation
+
+Receives all incoming IRC messages and emits `MessageReceived` events. This is the entry point for the command side.
+
+```raku
+aggregation ChannelAggregation {
+    has Str $.channel is projection-id;
+    has Supplier $.supplier;
+
+    multi method apply(MessageReceived $e) {
+        # No internal state needed - this is a pass-through aggregation
+    }
+
+    # Command: receives IRC message, emits event
+    method receive-message(Str $nick, Str $message) is command {
+        $.message-received: :$nick, :$message;
+    }
+}
+```
+
+**Important**: `ChannelAggregation` never sends IRC messages. It only emits `MessageReceived` events. The actual response logic lives in projections or external handlers that subscribe to the karma/alias events.
+
+#### KarmaAggregation
+
+Handles karma increment/decrement commands, enforces invariants (e.g., karma cannot go below zero), and emits events.
+
+```raku
+aggregation KarmaAggregation {
+    has Str $.target is projection-id;
+    has Int $.score = 0;
+    has Int $.increases = 0;
+    has Int $.decreases = 0;
+
+    multi method apply(KarmaIncreased $e) {
+        $!score = $!score + $e.amount;
+        $!increases++;
+    }
+    multi method apply(KarmaDecreased $e) {
+        $!score = $!score - $e.amount;
+        $!decreases++;
+    }
+    multi method apply(NickChanged $e) {
+        # Nick change is handled by the alias system
+    }
+
+    method increment-karma(Str :$changed-by, Int :$amount = 1) is command {
+        self.karma-increased: :$changed-by, :$amount, :changed-at(DateTime.now);
+    }
+
+    method decrement-karma(Str :$changed-by, Int :$amount = 1) is command {
+        self.karma-decreased: :$changed-by, :$amount, :changed-at(DateTime.now);
+    }
+}
+```
+
+#### AliasAggregation
+
+Handles alias management commands.
+
+```raku
+aggregation AliasAggregation {
+    has Str $.target is projection-id;
+    has Str $.alias;
+    has Bool $.is-active = True;
+
+    multi method apply(AliasSet $e) { 
+        $!alias = $e.alias;
+        $!is-active = True;
+    }
+    multi method apply(AliasRemoved $e) { 
+        $!is-active = False;
+    }
+
+    method set-alias(Str :$command, Str :$set-by) is command {
+        $.alias-set: :$command, :$set-by, :timestamp(DateTime.now);
+    }
+
+    method remove-alias(Str :$removed-by) is command {
+        $.alias-removed: :$removed-by, :timestamp(DateTime.now);
+    }
+}
+```
+
+### Query Side (Projections)
+
+Projections only handle `!` prefix commands. They read from projections, never emit events.
+
+#### KarmaProjection
+
+Tracks karma scores for display via `!karma [nick]`.
+
+```raku
+projection KarmaProjection {
+    has Str $.target is projection-id;
+    has Int $.score = 0;
+    has Int $.increases = 0;
+    has Int $.decreases = 0;
+
+    multi method apply(KarmaIncreased $e) {
+        $!score = $!score + $e.amount;
+        $!increases++;
+    }
+    multi method apply(KarmaDecreased $e) {
+        $!score = $!score - $e.amount;
+        $!decreases++;
+    }
+    multi method apply(NickChanged $e) {
+        # Nick change tracking handled separately
+    }
+
+    method status() {
+        my $status = $!score > 0 ?? "good" !! $!score < 0 ?? "bad" !! "neutral";
+        "{$!score} ($status)";
+    }
+}
+```
+
+#### AliasProjection
+
+Tracks nick aliases for display via `!aliases [nick]`.
+
+```raku
+projection AliasProjection {
+    has Str $.target is projection-id;
+    has Str $.alias;
+    has Bool $.is-active = True;
+    has Str $.command;
+
+    multi method apply(AliasSet $e) { 
+        $!alias = $e.alias;
+        $!command = $e.command;
+        $!is-active = True;
+    }
+    multi method apply(AliasRemoved $e) { 
+        $!is-active = False;
+    }
+
+    method is-active() { $!is-active && $!alias.defined }
+}
+```
+
+### Sagas (Orchestration)
+
+Sagas consume `MessageReceived` events, parse the message patterns, and dispatch to appropriate aggregation commands.
+
+#### KarmaHandler Saga
+
+Consumes `MessageReceived`, parses `nick++` / `nick--` patterns, calls karma aggregation commands.
+
+```raku
+saga KarmaHandler {
+    has Str     $.saga-id is projection-id;
+    has Str     $.state = 'idle';
+
+    # Handle incoming message
+    multi method apply(MessageReceived $e --> 'processing') {
+        my $msg = $e.message;
+        my $nick = $e.nick;
+
+        # Parse karma patterns: nick++ or nick--
+        if $msg ~~ /(\w+) \+\+/ {
+            my $target = $0.Str;
+            my $karma-agg = sourcing KarmaAggregation, :target($target);
+            $karma-agg.increment-karma: :changed-by($nick);
+        }
+        elsif $msg ~~ /(\w+) \-\-/ {
+            my $target = $0.Str;
+            my $karma-agg = sourcing KarmaAggregation, :target($target);
+            $karma-agg.decrement-karma: :changed-by($nick);
+        }
+
+        'idle'
+    }
+}
+```
+
+#### AliasHandler Saga
+
+Consumes `MessageReceived`, parses `nick => alias` patterns, calls alias aggregation commands.
+
+```raku
+saga AliasHandler {
+    has Str     $.saga-id is projection-id;
+    has Str     $.state = 'idle';
+
+    multi method apply(MessageReceived $e --> 'processing') {
+        my $msg = $e.message;
+        my $nick = $e.nick;
+
+        # Parse alias pattern: nick => alias
+        if $msg ~~ /(\w+) \s* \=\> \s* (\S+)/ {
+            my $target = $0.Str;
+            my $alias = $1.Str;
+            my $alias-agg = sourcing AliasAggregation, :target($target);
+            $alias-agg.set-alias: :command($alias), :set-by($nick);
+        }
+        # Parse remove alias: nick =>
+        elsif $msg ~~ /(\w+) \s* \=\> \s* $/ {
+            my $target = $0.Str;
+            my $alias-agg = sourcing AliasAggregation, :target($target);
+            $alias-agg.remove-alias: :removed-by($nick);
+        }
+
+        'idle'
+    }
+}
+```
+
+### Script Flow (irc-bot.raku)
+
+The main entry point distinguishes between commands and queries based on message prefix:
+
+```raku
+use Sourcing;
+use Sourcing::Plugin::Memory;
+use IRC::Bot::Channel::Aggregation;
+use IRC::Bot::Projections::KarmaProjection;
+use IRC::Bot::Alias::Projection;
+
+Sourcing::Plugin::Memory.use;
+
+# Mock IRC plugin - connects to an actual IRC server
+sub handle-irc-message(Str $channel, Str $nick, Str $message) {
+    # QUERY (read from projection) - ! prefix commands
+    if $message.starts-with('!') {
+        if $message ~~ /^\!karma \s* (\S*)/ {
+            my $target = $0.Str || $nick;
+            my $karma = sourcing KarmaProjection, :target($target);
+            say "Karma for $target: $karma.score()";
+            # No events emitted - pure query
+        }
+        elsif $message ~~ /^\!aliases \s* (\S*)/ {
+            my $target = $0.Str || $nick;
+            my @all-aliases = AliasProjection.^load-all;
+            my @matching = @all-aliases.grep: { .is-active && (.alias eq $target || .command.contains($target)) };
+            say "Aliases for $target: " ~ @matching.map({ "$_.alias => $_.command" }).join(', ');
+            # No events emitted - pure query
+        }
+    }
+    else {
+        # COMMAND (write via aggregation)
+        my $channel-agg = sourcing IRC::Bot::Channel::Aggregation, :channel($channel);
+        $channel-agg.receive-message: :$nick, :$message;
+        # This emits MessageReceived, which triggers sagas,
+        # which call aggregation commands, which emit karma/alias events
+    }
+}
+```
+        # ─── QUERY (read from projection) ──────────────────────────
+        if $message ~~ /^\!karma \s* (\S*)/ {
+            my $target = $0.Str || $nick;
+            my $karma = sourcing KarmaProjection, :$channel, :nick($target);
+            say "Karma for $target: $karma.score()";
+            # No events emitted - pure query
+        }
+        elsif $message ~~ /^\!aliases \s* (\S*)/ {
+            my $target = $0.Str || $nick;
+            my $alias-rec = sourcing AliasProjection, :$channel, :nick($target);
+            say "Alias for $target: $alias-rec.alias() // <none>";
+            # No events emitted - pure query
+        }
+    }
+    else {
+        # ─── COMMAND (write via aggregation) ───────────────────────
+        my $channel-agg = sourcing ChannelAggregation, :$channel;
+        $channel-agg.receive-message: :$nick, :$message;
+        # This emits MessageReceived, which triggers sagas,
+        # which call aggregation commands, which emit karma/alias events
+    }
+}
+```
+
+### Event Flow Sequence
+
+```mermaid
+sequenceDiagram
+    participant IRC as IRC Server
+    participant Bot as irc-bot.raku
+    participant CA as ChannelAggregation
+    participant KH as KarmaHandler Saga
+    participant KA as KarmaAggregation
+    participant KP as KarmaProjection
+
+    IRC->>Bot: "nick++"
+    alt Query (! prefix)
+        Bot->>KP: sourcing KarmaProjection, :nick
+        KP-->>Bot: return score
+    else Command (no ! prefix)
+        Bot->>CA: receive-message(:$nick, :$message)
+        CA->>CA: emit MessageReceived
+        CA-->>Bot: return event
+    end
+
+    Note over Bot,KP: Event flows through ProjectionStorage
+
+    Bot->>KH: MessageReceived event arrives
+    KH->>KH: Parse "nick++" pattern
+    KH->>KA: call increment-karma()
+    KA->>KA: validate, emit KarmaIncreased
+    KA-->>KH: return event
+
+    KP-->>KP: apply(KarmaIncreased)
+    KP updates: $.score += 1
+```
+
+### Summary
+
+| Component | Type | Responsibility | Emits Events? | IRC Output? |
+|-----------|------|----------------|---------------|-------------|
+| `ChannelAggregation` | Aggregation | Entry point for messages | `MessageReceived` | No |
+| `KarmaAggregation` | Aggregation | Karma validation/commands | `KarmaIncreased`, `KarmaDecreased` | No |
+| `AliasAggregation` | Aggregation | Alias validation/commands | `AliasSet`, `AliasRemoved` | No |
+| `KarmaHandler` | Saga | Parse `++`/--`, dispatch commands | Via called aggregations | No |
+| `AliasHandler` | Saga | Parse `=>`, dispatch commands | Via called aggregations | No |
+| `KarmaProjection` | Projection | Query model for karma | No | No (external) |
+| `AliasProjection` | Projection | Query model for aliases | No | No (external) |
+
+**Key invariants enforced:**
+
+1. **No direct responses from aggregations** — Commands only emit events. IRC responses are handled externally by subscribing to the event stream.
+2. **No event emission from projections** — Queries read from projections without side effects.
+3. **Sagas as orchestrators** — Sagas consume domain events and dispatch to aggregation commands.
+4. **`!` prefix for queries** — The bot treats `!` commands as pure reads; everything else as commands.
 
 ---
 

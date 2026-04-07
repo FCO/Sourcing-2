@@ -56,7 +56,7 @@ use v6.e.PREVIEW;               # Language version (when needed)
 |------|------------|---------|
 | Classes | CamelCase | `ProjectionStorage` |
 | Roles | CamelCase | `Sourcing::Projection` |
-| Methods | camelCase | `apply`, `get-events-after` |
+| Methods | kebab-case | `apply`, `get-events-after` |
 | Attributes (public) | `$.name` | `$.id`, `$.supply` |
 | Attributes (private) | `$!name` | `$!type`, `$!supply` |
 | Constants | UPPER_SNAKE | `projection`, `aggregation` |

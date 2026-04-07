@@ -5,7 +5,15 @@ use lib '/Users/fernando/Projects/Sourcing/lib';
 use Sourcing;
 use Sourcing::Plugin::Memory;
 use IRC::Client;
-use Sourcing::Example::IRCBot::Events;
+
+use IRC::Bot::Channel::Aggregation;
+use IRC::Bot::Channel::Events;
+use IRC::Bot::Projections::KarmaProjection;
+use IRC::Bot::Alias::Projection;
+use IRC::Bot::Karma::Events;
+use IRC::Bot::Saga::KarmaHandler;
+use IRC::Bot::Saga::AliasHandler;
+use IRC::Bot::Saga::Supply;
 
 sub load-config(Str $file) {
     my %config;
@@ -46,14 +54,6 @@ class BotConfig {
     }
 }
 
-projection KarmaProjection {
-    has Str $.target is projection-id;
-    has Int $.karma = 0;
-    
-    multi method apply(KarmaIncreased $e) { $!karma += $e.amount; }
-    multi method apply(KarmaDecreased $e) { $!karma -= $e.amount; }
-}
-
 class Plugin does IRC::Client::Plugin {
     has BotConfig $.config;
     has $!store;
@@ -71,47 +71,73 @@ class Plugin does IRC::Client::Plugin {
         say "JOINED: {$event.nick} in {$event.channel}";
     }
     
-    method irc-event($event) {
-        #say "EVENT: {$event.command}";
-    }
-    
     method irc-privmsg-channel($event) {
         my $text = $event.text;
+        my $channel = $event.channel;
+        my $nick = $event.nick;
         
-        if $text ~~ /^^(\S+)\+\+$ || ^^\+\+(\S+)$/ {
-            my $target = ~($0 || $1);
-            my $e = KarmaIncreased.new(:$target, :changed-by($event.nick), :amount(1), :changed-at(DateTime.now));
-            $*SourcingConfig.emit: $e, :type(KarmaProjection), :ids{:$target};
-            my $karma = sourcing KarmaProjection, :$target;
-            $event.reply: "$target: {$karma.karma // 0} karma";
+        # Skip messages from the bot itself
+        return if $nick eq $.config.nickname;
+        
+        # Only handle '!' prefix commands as QUERIES (reads) - these query projections directly
+        # Queries do NOT emit events - that's CQRS!
+        if $text ~~ /^\!karma$/ {
+            my $karma-proj = sourcing IRC::Bot::Projections::KarmaProjection, :target($nick);
+            my $score = $karma-proj.score // 0;
+            $event.irc.send(:where($channel), :text("$nick has $score karma"));
             return;
         }
         
-        if $text ~~ /^^(\S+)\-\-$ || ^^\-\-(\S+)$/ {
-            my $target = ~($0 || $1);
-            my $e = KarmaDecreased.new(:$target, :changed-by($event.nick), :amount(1), :changed-at(DateTime.now));
-            $*SourcingConfig.emit: $e, :type(KarmaProjection), :ids{:$target};
-            my $karma = sourcing KarmaProjection, :$target;
-            $event.reply: "$target: {$karma.karma // 0} karma";
+        if $text ~~ /^\!karma <[\s]>+ (<[\S]>+)$/ {
+            my $target = ~$0;
+            my $karma-proj = sourcing IRC::Bot::Projections::KarmaProjection, :target($target);
+            my $score = $karma-proj.score // 0;
+            $event.irc.send(:where($channel), :text("$target has $score karma"));
             return;
         }
         
-        if $text ~~ /^\!karma[\s+(\S+)]?/ {
-            my $target = ~($0 || $event.nick);
-            my $karma = sourcing KarmaProjection, :$target;
-            $event.reply: "$target has {$karma.karma // 0} karma";
+        if $text ~~ /^\!aliases$/ {
+            my $target = $nick;
+            my @all-aliases = IRC::Bot::Alias::Projection.^load-all;
+            my @matching = @all-aliases.grep: { .is-active && (.alias eq $target || .command.contains($target)) };
+            
+            if @matching.elems == 0 {
+                $event.irc.send(:where($channel), :text("$target has no aliases"));
+            } else {
+                my $list = @matching.map({ "$_.alias => $_.command" }).join(', ');
+                $event.irc.send(:where($channel), :text("$target aliases: $list"));
+            }
             return;
         }
         
-        if $text eq '!help' {
-            $event.reply: "Commands: ++user, --user, !karma [user], !help";
+        if $text ~~ /^\!aliases <[\s]>+ (<[\S]>+)$/ {
+            my $target = ~$0;
+            my @all-aliases = IRC::Bot::Alias::Projection.^load-all;
+            my @matching = @all-aliases.grep: { .is-active && (.alias eq $target || .command.contains($target)) };
+            
+            if @matching.elems == 0 {
+                $event.irc.send(:where($channel), :text("$target has no aliases"));
+            } else {
+                my $list = @matching.map({ "$_.alias => $_.command" }).join(', ');
+                $event.irc.send(:where($channel), :text("$target aliases: $list"));
+            }
             return;
         }
         
-        if $text.starts-with('!') {
-            $event.reply: "Unknown. Try !help";
+        if $text.trim eq '!help' {
+            $event.irc.send(:where($channel), :text("Commands: !karma [nick], !aliases [nick], ++nick, --nick, nick=>newnick, !help"));
+            return;
         }
-
+        
+        # For ALL other messages - emit a MessageReceived event through the Channel aggregation
+        # This is the COMMAND path (write) - the sagas will handle ++, --, => patterns
+        my $channel-agg = sourcing IRC::Bot::Channel::Aggregation, :channel($channel);
+        $channel-agg.receive-message: :$nick, :message($text);
+        
+        # NOTE: We do NOT respond to ++/--/=> here - that's the saga's job
+        # The saga consumes the MessageReceived event and calls the appropriate aggregation commands
+        # Any responses to commands come from separate query plugins, not here
+        
         Nil
     }
 }
@@ -122,8 +148,24 @@ sub MAIN() {
     say "Connecting to {$config.server}:{$config.port}";
     say "Channels: {$config.channels.join(', ')}";
     
+    # Initialize the memory store
     my $store = Sourcing::Plugin::Memory.new;
     $store.use;
+    
+    # Get reference to SourcingConfig process variable after store is used
+    my $sourcing-config = sourcing-config;
+    
+    # Set up a callback for saga responses to be sent back to IRC
+    my %channel-callbacks;
+    for $config.channels -> $ch {
+        set-channel-callback($ch, -> $response {
+            # Responses from sagas go to the channel (handled out-of-band)
+            say "SAGA RESPONSE: $response";
+        });
+    }
+    
+    # Start the saga supply to process events through sagas
+    start-saga-supply($sourcing-config, :verbose($config.verbose));
     
     my $plugin = Plugin.new(:$config, :$store);
     
@@ -139,6 +181,3 @@ sub MAIN() {
         :plugins($plugin)
     ).run;
 }
-
-MAIN();
-

@@ -45,6 +45,16 @@
         a:hover { text-decoration: underline; }
     </style>
     <link rel="stylesheet" href="../_sidebar.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'dark',
+            themeVariables: {
+                darkMode: true
+            }
+        });
+    </script>
 </head>
 <body>
     <main class="main">
@@ -67,16 +77,34 @@
         </div>
 
         <h2>Project Structure</h2>
-        <pre><code>examples/irc-bot/
-├── bin/
-│   └── irc-bot.raku          # Main executable
-├── lib/
-│   └── Sourcing/
-│       └── Example/
-│           └── IRCBot/        # Domain modules
-├── config.toml                # Bot configuration
-└── t/
-    └── 01-irc-bot.rakutest   # Tests</code></pre>
+        <pre><code>📁 examples/irc-bot/
+├── 📄 bin/
+│   └── 📄 irc-bot.raku          # Main executable
+├── 📁 lib/
+│   └── 📁 IRC/
+│       └── 📁 Bot/
+│           ├── 📁 Alias/
+│           │   ├── 📄 Aggregation.rakumod
+│           │   ├── 📄 Events.rakumod
+│           │   └── 📄 Projection.rakumod
+│           ├── 📁 Channel/
+│           │   ├── 📄 Aggregation.rakumod
+│           │   └── 📄 Events.rakumod
+│           ├── 📁 Karma/
+│           │   ├── 📄 Aggregation.rakumod
+│           │   └── 📄 Events.rakumod
+│           ├── 📁 Projections/
+│           │   ├── 📄 KarmaProjection.rakumod
+│           │   └── 📄 ChannelLogProjection.rakumod
+│           ├── 📁 Saga/
+│           │   ├── 📄 KarmaHandler.rakumod
+│           │   ├── 📄 AliasHandler.rakumod
+│           │   └── 📄 Supply.rakumod
+│           └── 📄 Plugin/
+│               └── 📄 Karma.rakumod
+├── 📄 config.toml                # Bot configuration
+└── 📁 t/
+    └── 📄 01-irc-bot.rakutest   # Tests</code></pre>
 
         <h2>Configuration</h2>
         <p>The bot is configured via <code>config.toml</code>:</p>
@@ -132,6 +160,59 @@ $*SourcingConfig.emit: $e, :type(KarmaProjection), :ids({target => $target});</c
         <p>To get a user's current karma, use the <code>sourcing</code> function:</p>
         <pre><code>my $karma = sourcing KarmaProjection, :target($username);
 say $karma.karma;  # Current karma score</code></pre>
+
+        <h2>Event Flow</h2>
+        <pre class="mermaid">
+%%{init: {"theme": "dark", "themeVariables": { "darkMode": true }}}%%
+sequenceDiagram
+    participant IRC as IRC Server
+    participant Plugin as Bot Plugin
+    participant CA as ChannelAggregation
+    participant PS as ProjectionStorage
+    participant KH as KarmaHandler Saga
+    participant AH as AliasHandler Saga
+    participant KA as KarmaAggregation
+    participant AA as AliasAggregation
+    participant KP as KarmaProjection
+    participant AP as AliasProjection
+
+    Note over IRC, Plugin: IRC Message → Events Flow
+    IRC->>Plugin: PRIVMSG #channel: user++
+
+    Plugin->>CA: ChannelAggregation.receive-message(nick, message)
+    CA->>CA: emit MessageReceived event
+    CA->>PS: store(MessageReceived)
+
+    PS->>KH: routing to sagas
+    KH->>KH: apply(MessageReceived) → processing
+    KH->>KH: parse /(\S+)++$/ pattern
+
+    KH->>KA: KarmaAggregation.increment-karma(target)
+    KA->>KA: emit KarmaIncreased event
+    KA->>PS: store(KarmaIncreased)
+
+    KP->>KP: apply(KarmaIncreased) → update score
+    KP->>KP: apply(KarmaIncreased) → update increases
+
+    Note over IRC, Plugin: Query Flow
+    IRC->>Plugin: PRIVMSG #channel: !karma user
+    Plugin->>KP: KarmaProjection.get-score(nick)
+    KP-->>Plugin: score: 5
+    Plugin-->>IRC: PRIVMSG #channel: "user has karma 5"
+
+    Note over IRC, Plugin: Alias Flow
+    IRC->>Plugin: PRIVMSG #channel: user=> newname
+    Plugin->>AA: AliasAggregation.set-alias(user, newname)
+    AA->>AA: emit AliasSet event
+    AA->>PS: store(AliasSet)
+
+    AP->>AP: apply(AliasSet) → update mapping
+
+    IRC->>Plugin: PRIVMSG #channel: !aliases user
+    Plugin->>AP: AliasProjection.get-aliases(user)
+    AP-->>Plugin: aliases: [newname]
+    Plugin-->>IRC: PRIVMSG #channel: "user aliases: newname"
+</pre>
 
         <h2>Testing</h2>
         <p>Run the tests:</p>

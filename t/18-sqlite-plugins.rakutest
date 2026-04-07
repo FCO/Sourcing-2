@@ -1,0 +1,118 @@
+use Test;
+use Sourcing;
+use Sourcing::Projection;
+
+my $dbiish-available = True;
+try {
+    require DBIish;
+    CATCH { default { $dbiish-available = False } }
+}
+
+unless $dbiish-available {
+    plan 1;
+    skip "DBIish not installed; install with `zef install DBIish` to run SQLite plugin tests", 1;
+    done-testing;
+    exit;
+}
+
+require Sourcing::Plugin::EventStore::SQLite;
+require Sourcing::Plugin::StateCache::SQLite;
+require Sourcing::ProjectionStorage;
+
+my $tmp-dir = "t/tmp".IO;
+$tmp-dir.mkdir unless $tmp-dir.e;
+
+my $event-db = "t/tmp/event-store.sqlite";
+my $cache-db = "t/tmp/state-cache.sqlite";
+
+try unlink $event-db if $event-db.IO.e;
+try unlink $cache-db if $cache-db.IO.e;
+
+END {
+    try unlink $event-db if $event-db.IO.e;
+    try unlink $cache-db if $cache-db.IO.e;
+}
+
+class UserAdded { has Int $.id; has Str $.name }
+class ProjectionRegistered { has Mu $.type; has Str $.name; has @.ids; has %.map }
+
+subtest "EventStore::SQLite stores and retrieves events" => {
+
+    my %map{Mu:U};
+    %map{UserAdded} = { id => 'id' };
+    my $store = Sourcing::Plugin::EventStore::SQLite.new(:database-path($event-db));
+
+    lives-ok { $store.emit(UserAdded.new(:id(1), :name("Ada"))) }, "emits event";
+    lives-ok { $store.emit(ProjectionRegistered.new(:type(UserAdded))) }, "emits ProjectionRegistered";
+    lives-ok { $store.emit(UserAdded.new(:id(1), :name("Bob"))) }, "emits second event";
+
+    is $store.number-of-events, 3, "counts stored events";
+
+    my @events = $store.get-events({ id => 1 }, %map);
+    is @events.elems, 2, "retrieves matching events";
+    is @events[0].name, "Ada", "returns events in order" if @events.elems >= 1;
+
+    my @after = $store.get-events-after(0, { id => 1 }, %map);
+    is @after.elems, 1, "returns events after version";
+    is @after[0].name, "Bob", "returns expected event after version" if @after.elems >= 1;
+
+    $store.disconnect;
+};
+
+subtest "StateCache::SQLite stores and reloads projection state" => {
+    projection MyProjection {
+        has Int $.id is projection-id;
+        has Str $.name;
+        method apply($) { }
+    }
+
+    my $cache = Sourcing::Plugin::StateCache::SQLite.new(:path($cache-db));
+    my $projection = MyProjection.new(:id(42), :name("Nora"));
+
+    $cache.store-cached-data($projection, :last-id(3));
+
+    my %cached = $cache.get-cached-data(MyProjection, %(id => 42));
+    is %cached<last-id>, 3, "returns stored last-id";
+    is %cached<data><id>, 42, "stores projection id";
+    is %cached<data><name>, "Nora", "stores projection data";
+
+    my $cache-reloaded = Sourcing::Plugin::StateCache::SQLite.new(:path($cache-db));
+    my %reloaded = $cache-reloaded.get-cached-data(MyProjection, %(id => 42));
+    is %reloaded<last-id>, 3, "persists last-id across instances";
+    is %reloaded<data><name>, "Nora", "persists projection data";
+
+    $cache-reloaded.disconnect;
+    $cache.disconnect;
+};
+
+subtest "ProjectionStorage.register does not optimistic lock in SQLite" => {
+    plan 2;
+    try unlink $event-db if $event-db.IO.e;
+    class SqlEvent { has Int $.id; has Int $.value }
+
+    aggregation SqlAggregate {
+        has Int $.id is projection-id;
+        has Int $.value = 0;
+
+        multi method apply(SqlEvent $_) {
+            $!value += .value;
+        }
+    }
+
+    my $store = Sourcing::Plugin::EventStore::SQLite.new(:database-path($event-db));
+    PROCESS::<$SourcingConfig> = $store;
+
+    my $storage = Sourcing::ProjectionStorage.new;
+    start { await $storage.start }
+
+    lives-ok { $storage.register: SqlAggregate }, "registers projection without optimistic lock";
+
+    my $aggregate = sourcing SqlAggregate, :id(1);
+    lives-ok { $aggregate.sql-event: :value(5) }, "emits event after registration";
+
+    $store.disconnect;
+};
+
+plan 3;
+
+done-testing;

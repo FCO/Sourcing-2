@@ -235,6 +235,7 @@ A new saga instance with all events applied.
 
 method lookup(Sourcing::Saga:U $type: *%ids) {
 	my %map{Mu:U} = $type.^handled-events-map;
+	my $*SourcingReplay = True;
 	my @initial-events = $*SourcingConfig.get-events-after: -1, %ids, %map;
 	
 	my $new = $type.new: |%ids, :@initial-events;

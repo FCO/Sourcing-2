@@ -16,25 +16,25 @@ scheduling, timeout firing, saga creation, and aggregation binding.
 unit class Sourcing::Saga::Events;
 
 our class TimeOutScheduled is export {
-	has $.saga-id;
-	has Str $.handler-name;
-	has DateTime $.scheduled-at;
+    has $.saga-id;
+    has Str $.handler-name;
+    has DateTime $.scheduled-at;
 }
 
 our class TimedOut is export {
-	has $.saga-id;
-	has Str $.handler-name;
+    has $.saga-id;
+    has Str $.handler-name;
 }
 
 our class SagaCreated is export {
-	has $.saga-id;
-	has $.saga-type;
-	has Hash %.aggregation-ids;
+    has $.saga-id;
+    has $.saga-type;
+    has Hash %.aggregation-ids;
 }
 
 our class SagaAggregationBound is export {
-	has $.saga-id;
-	has Str $.attribute-name;
-	has Str $.aggregation-type;
-	has Hash %.ids;
+    has $.saga-id;
+    has Str $.attribute-name;
+    has Str $.aggregation-type;
+    has Hash %.ids;
 }

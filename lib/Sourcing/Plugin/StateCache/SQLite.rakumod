@@ -1,5 +1,6 @@
 use v6.e.PREVIEW;
 
+use DBIish;
 use Sourcing::Plugin::StateCache;
 
 =begin pod
@@ -51,7 +52,7 @@ multi method store-cached-data($proj, Int :$last-id!) {
 multi method store-cached-data(Mu:U $proj, %ids, %data, Int :$last-id!) {
 	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
 	my $type-name = $proj.^name;
-	my $data-json = Rakudo::Internals::JSON.stringify: %data;
+	my $data-json = Rakudo::Internals::JSON.to-json: %data;
 	my $now = DateTime.now.Str;
 	
 	$!db.execute: q:to/SQL/, $type-name, $id-key, $data-json, $last-id, $now;
@@ -64,15 +65,16 @@ method get-cached-data(Mu:U $proj, %ids) is rw {
 	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
 	my $type-name = $proj.^name;
 	
-	my $result = $!db.execute: $type-name, $id-key;
+	my $sth = $!db.prepare('SELECT data, last_id FROM projection_cache WHERE projection_type = ? AND id_key = ?');
+	$sth.execute($type-name, $id-key);
 	
 	my %return = last-id => -1, data => %();
-	if $result {
-		my $row = $result[0];
-		my $data-json = $row[2];
-		my $last-id = $row[3];
+	my $row = $sth.row(:hash);
+	if $row {
+		my $data-json = $row<data>;
+		my $last-id = $row<last_id> // -1;
 		%return<last-id> = $last-id;
-		%return<data> = Rakudo::Internals::JSON.parse: $data-json;
+		%return<data> = Rakudo::Internals::JSON.from-json: $data-json;
 	}
 	%return
 }

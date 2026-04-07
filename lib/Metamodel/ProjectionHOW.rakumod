@@ -86,6 +86,9 @@ method update($proj) {
 	my $attr    = $proj.^attributes.first: *.name eq '$!__current-version__';
 
 	my %map{Mu:U} = $proj.^handled-events-map;
+
+	# Set $*SourcingReplay to prevent command execution during replay
+	my $*SourcingReplay = True;
 	my @initial-events = $*SourcingConfig.get-events-after: -1, %ids, %map;
 
 	$proj.apply: $_ for @initial-events;

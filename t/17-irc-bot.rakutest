@@ -1,0 +1,113 @@
+use v6.e.PREVIEW;
+
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+use Sourcing::ProjectionStorage;
+
+use lib 'examples/irc-bot/lib';
+
+use IRC::Bot::Channel::Aggregation;
+use IRC::Bot::Channel::Events;
+use IRC::Bot::Karma::Aggregation;
+use IRC::Bot::Karma::Events;
+use IRC::Bot::Projections::KarmaProjection;
+use IRC::Bot::Saga::Supply;
+
+plan 3;
+
+# Helper to reset state between tests
+sub reset-state() {
+    stop-saga-supply();
+    clear-channel-callbacks();
+    Sourcing::Plugin::Memory.use;
+}
+
+subtest 'single MessageReceived produces one karma increment' => {
+    reset-state();
+
+    # IMPORTANT: Set callback BEFORE starting saga supply
+    # The saga only processes messages when a callback exists
+    set-channel-callback('#sourcing', -> $response { });
+
+    # Start the saga supply to listen for MessageReceived events
+    my $tap = start-saga-supply($*SourcingConfig, :verbose(False));
+
+    # Create Channel aggregation and call receive-message command
+    my $channel = sourcing IRC::Bot::Channel::Aggregation, :channel('#sourcing');
+    $channel.receive-message: :nick('alice'), :message('SmokeMachine++');
+
+    # Wait for saga to process
+    await Promise.in: 0.05;
+
+    # Now only ONE event should be emitted (no replay duplication)
+    my $projection = sourcing IRC::Bot::Projections::KarmaProjection, :target('SmokeMachine');
+    is $projection.score, 1, 'karma score is 1 (no double-execution)';
+
+    # Verify only one KarmaIncreased event was emitted
+    my @karma-events = $*SourcingConfig.events.grep(-> $event {
+        $event ~~ KarmaIncreased && $event.target eq 'SmokeMachine'
+    });
+    is @karma-events.elems, 1, 'one KarmaIncreased event emitted';
+
+    reset-state();
+}
+
+subtest 'replay processes duplicate messages' => {
+    reset-state();
+
+    set-channel-callback('#sourcing', -> $response { });
+    my $tap = start-saga-supply($*SourcingConfig, :verbose(False));
+
+    my $channel = sourcing IRC::Bot::Channel::Aggregation, :channel('#sourcing');
+    $channel.receive-message: :nick('alice'), :message('SmokeMachine++');
+
+    await Promise.in: 0.05;
+
+    # First message results in 1 event (no replay duplication)
+    my @karma-events = $*SourcingConfig.events.grep(-> $event {
+        $event ~~ KarmaIncreased && $event.target eq 'SmokeMachine'
+    });
+    is @karma-events.elems, 1, 'first message emits 1 event';
+
+    # Send same message again - simulates replay
+    $channel.receive-message: :nick('replay'), :message('SmokeMachine++');
+
+    await Promise.in: 0.05;
+
+    # After second message should have 2 events total (1 + 1 more)
+    @karma-events = $*SourcingConfig.events.grep(-> $event {
+        $event ~~ KarmaIncreased && $event.target eq 'SmokeMachine'
+    });
+    is @karma-events.elems, 2, 'replay emits 2 events total';
+
+    reset-state();
+}
+
+subtest 'start-saga-supply is idempotent' => {
+    reset-state();
+
+    set-channel-callback('#sourcing', -> $response { });
+
+    # Call start-saga-supply twice - should return the same tap
+    my $tap-one = start-saga-supply($*SourcingConfig, :verbose(False));
+    my $tap-two = start-saga-supply($*SourcingConfig, :verbose(False));
+
+    ok $tap-one === $tap-two, 'setup returns the same tap instance';
+
+    # Process a message
+    my $channel = sourcing IRC::Bot::Channel::Aggregation, :channel('#sourcing');
+    $channel.receive-message: :nick('bob'), :message('TestTarget++');
+
+    await Promise.in: 0.05;
+
+    # Should have 1 event (no double execution)
+    my @karma-events = $*SourcingConfig.events.grep(-> $event {
+        $event ~~ KarmaIncreased && $event.target eq 'TestTarget'
+    });
+    is @karma-events.elems, 1, 'one KarmaIncreased after single message';
+
+    reset-state();
+}
+
+done-testing;

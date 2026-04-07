@@ -91,6 +91,7 @@ my $projection = sourcing MyProjection, :id($some-id);
 
 sub sourcing(Sourcing::Projection:U $proj, *%ids) is export {
 	my %map{Mu:U} = $proj.^handled-events-map;
+	my $*SourcingReplay = True;
 	my @initial-events = $*SourcingConfig.get-events-after: -1, %ids, %map;
 
 	my $new = $proj.new: |%ids, :@initial-events;

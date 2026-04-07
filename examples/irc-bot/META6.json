@@ -1,0 +1,39 @@
+{
+  "author": "Fernando Cordeiro <fernando@fernamrc.com>",
+  "build-depends": [
+  ],
+  "depends": [
+    "Sourcing",
+    "IRC::Client"
+  ],
+  "description": "IRC bot example demonstrating Sourcing concepts",
+  "license": "NOASSERTION",
+  "name": "Sourcing::Example::IRCBot",
+  "provides": {
+    "IRC::Bot::Alias::Aggregation": "lib/IRC/Bot/Alias/Aggregation.rakumod",
+    "IRC::Bot::Alias::Events": "lib/IRC/Bot/Alias/Events.rakumod",
+    "IRC::Bot::Alias::Projection": "lib/IRC/Bot/Alias/Projection.rakumod",
+    "IRC::Bot::Channel::Aggregation": "lib/IRC/Bot/Channel/Aggregation.rakumod",
+    "IRC::Bot::Channel::Events": "lib/IRC/Bot/Channel/Events.rakumod",
+    "IRC::Bot::Karma::Aggregation": "lib/IRC/Bot/Karma/Aggregation.rakumod",
+    "IRC::Bot::Karma::Events": "lib/IRC/Bot/Karma/Events.rakumod",
+    "IRC::Bot::Projections::ChannelLogProjection": "lib/IRC/Bot/Projections/ChannelLogProjection.rakumod",
+    "IRC::Bot::Projections::KarmaProjection": "lib/IRC/Bot/Projections/KarmaProjection.rakumod",
+    "IRC::Bot::Saga::AliasHandler": "lib/IRC/Bot/Saga/AliasHandler.rakumod",
+    "IRC::Bot::Saga::KarmaHandler": "lib/IRC/Bot/Saga/KarmaHandler.rakumod",
+    "IRC::Plugin::Karma": "lib/IRC/Plugin/Karma.rakumod"
+  },
+  "resources": [
+    "config.toml"
+  ],
+  "scripts": {
+    "irc-bot": "bin/irc-bot.raku"
+  },
+  "source-url": "https://github.com/FCO/Sourcing-2.git",
+  "tags": [
+  ],
+  "test-depends": [
+    "Test"
+  ],
+  "version": "0.1.0"
+}
