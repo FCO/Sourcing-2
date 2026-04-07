@@ -1,0 +1,196 @@
+/**
+ * Mermaid Fullscreen Styles
+ * Dark theme with zoom/pan support
+ */
+
+/* Hint shown below mermaid diagrams */
+.mermaid-expandable {
+    cursor: pointer;
+    position: relative;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+    border-radius: 8px;
+    border: 1px solid transparent;
+}
+
+.mermaid-expandable:hover {
+    box-shadow: 0 0 0 2px var(--accent, #58a6ff);
+}
+
+.mermaid-expandable::after {
+    content: 'Click to expand';
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    background: rgba(0, 0, 0, 0.7);
+    color: #8b949e;
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    pointer-events: none;
+}
+
+.mermaid-expandable:hover::after {
+    opacity: 1;
+}
+
+/* Fullscreen overlay */
+.mermaid-fullscreen-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.9);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: mermaid-fade-in 0.2s ease;
+}
+
+@keyframes mermaid-fade-in {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+/* Fullscreen container */
+.mermaid-fullscreen-container {
+    width: 90vw;
+    height: 90vh;
+    display: flex;
+    flex-direction: column;
+    background: #161b22;
+    border-radius: 12px;
+    border: 1px solid #30363d;
+    overflow: hidden;
+}
+
+/* Header */
+.mermaid-fullscreen-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: #0d1117;
+    border-bottom: 1px solid #30363d;
+    flex-shrink: 0;
+}
+
+.mermaid-fullscreen-title {
+    color: #e6edf3;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.mermaid-fullscreen-controls {
+    display: flex;
+    gap: 8px;
+}
+
+.mermaid-fullscreen-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #8b949e;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.mermaid-fullscreen-btn:hover {
+    background: #30363d;
+    color: #e6edf3;
+}
+
+.mermaid-fullscreen-btn svg {
+    pointer-events: none;
+}
+
+.mermaid-fullscreen-close:hover {
+    background: #f85149;
+    border-color: #f85149;
+    color: #ffffff;
+}
+
+/* Diagram area - scrollable container */
+.mermaid-fullscreen-diagram {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    cursor: grab;
+    background: #0d1117;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mermaid-fullscreen-diagram svg {
+    max-width: none;
+    max-height: none;
+    transition: transform 0.1s ease;
+    transform-origin: center center;
+}
+
+/* Scrollbar styling */
+.mermaid-fullscreen-diagram::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+.mermaid-fullscreen-diagram::-webkit-scrollbar-track {
+    background: #161b22;
+}
+
+.mermaid-fullscreen-diagram::-webkit-scrollbar-thumb {
+    background: #30363d;
+    border-radius: 5px;
+}
+
+.mermaid-fullscreen-diagram::-webkit-scrollbar-thumb:hover {
+    background: #484f58;
+}
+
+/* Keyboard focus styles */
+.mermaid-expandable:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--accent, #58a6ff);
+}
+
+.mermaid-expandable:focus::after {
+    opacity: 1;
+    content: 'Press Enter to expand';
+}
+
+/* Hide scrollbar on body when fullscreen is open */
+body.mermaid-fullscreen-open {
+    overflow: hidden;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .mermaid-fullscreen-container {
+        width: 100vw;
+        height: 100vh;
+        border-radius: 0;
+    }
+    
+    .mermaid-fullscreen-btn {
+        width: 44px;
+        height: 44px;
+    }
+    
+    .mermaid-expandable::after {
+        font-size: 11px;
+        padding: 3px 6px;
+    }
+}
