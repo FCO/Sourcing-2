@@ -1,4 +1,5 @@
 use v6.e.PREVIEW;
+use Sourcing::Projection;
 
 =begin pod
 
@@ -33,7 +34,19 @@ handle persistence and notification of the event supply.
 
 =end pod
 
-method emit($, :$current-version) {...}
+method emit($, :$type, :%ids, :$current-version) {...}
+
+multi method emit(Sourcing::Projection $source, $event, |c) {
+	my %ids = $source.^projection-id-pairs;
+	my $curr-version-attr = $source.^attributes.first: *.name eq '$!__current-version__';
+	my $current-version = $curr-version-attr ?? ($curr-version-attr.get_value($source) // -1) !! -1;
+
+	self.emit: $event,
+		:type($source.WHAT),
+		:ids(%ids),
+		:$current-version,
+		|c;
+}
 
 =begin pod
 

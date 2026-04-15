@@ -92,12 +92,16 @@ my $projection = sourcing MyProjection, :id($some-id);
 sub sourcing(Sourcing::Projection:U $proj, *%ids) is export {
 	my %map{Mu:U} = $proj.^handled-events-map;
 	my $*SourcingReplay = True;
-	my @initial-events = $*SourcingConfig.get-events-after: -1, %ids, %map;
+	my %cached = $*SourcingConfig.get-cached-data($proj, %ids);
+	my $last-id = %cached<snapshot-last-id> // (%cached<last-id> // -1);
+	my %cached-data = %cached<data> ~~ Associative ?? %(%cached<data>) !! %();
+	my @initial-events = $*SourcingConfig.get-events-after: $last-id, %ids, %map;
 
-	my $new = $proj.new: |%ids, :@initial-events;
-	$new.^attributes.first(*.name eq '$!__current-version__').set_value: $new, @initial-events.elems - 1;
+	my $new = $proj.new: |%cached-data, |%ids, :@initial-events;
+	my $new-id = $last-id + @initial-events.elems;
+	$new.^attributes.first(*.name eq '$!__current-version__').set_value: $new, $new-id;
 
-	$*SourcingConfig.store-cached-data: $new, :last-id(@initial-events.elems - 1);
+	$*SourcingConfig.store-cached-data: $new, :last-id($new-id);
 	$new
 }
 

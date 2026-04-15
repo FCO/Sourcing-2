@@ -32,23 +32,39 @@ submethod TWEAK(|) {
 	$!dbh.execute(q:to/STATEMENT/);
 		CREATE TABLE IF NOT EXISTS events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			type TEXT NOT NULL,
-			ids TEXT,
+			event_type TEXT NOT NULL,
+			aggregate_type TEXT,
+			projection_ids TEXT NOT NULL DEFAULT '[]',
+			stream_key TEXT,
+			stream_version INTEGER,
 			data TEXT NOT NULL,
+			metadata TEXT,
 			timestamp TEXT NOT NULL
 		)
 		STATEMENT
 
 	$!dbh.execute(q:to/STATEMENT/);
-		CREATE INDEX IF NOT EXISTS idx_events_type_ids
-		ON events(type, ids)
+		CREATE INDEX IF NOT EXISTS idx_events_event_type
+		ON events(event_type, id)
+		STATEMENT
+
+	$!dbh.execute(q:to/STATEMENT/);
+		CREATE INDEX IF NOT EXISTS idx_events_stream
+		ON events(stream_key, stream_version)
+		STATEMENT
+
+	$!dbh.execute(q:to/STATEMENT/);
+		-- Enforces one write per stream/version pair for optimistic locking
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_events_stream_unique
+		ON events(stream_key, stream_version)
+		WHERE stream_key IS NOT NULL AND stream_version IS NOT NULL
 		STATEMENT
 
 	# Load existing events and emit them to the supply
-	my $sth = $!dbh.execute('SELECT id, type, ids, data, timestamp FROM events ORDER BY id');
+	my $sth = $!dbh.execute('SELECT id, event_type, data FROM events ORDER BY id');
 	while my $row = $sth.row(:hash) {
-	$!event-id = $row<id>;
-		my $event = self!deserialize-event($row<type>, $row<data>);
+		$!event-id = $row<id>;
+		my $event = self!deserialize-event($row<event_type>, $row<data>);
 		$!supplier.emit: $event;
 	}
 }
@@ -102,6 +118,19 @@ method !serialize-event($event) {
 	($type, $data);
 }
 
+method !ordered-projection-ids(Mu:U $type, %ids) {
+	my @projection-id-names = $type.^projection-id-names;
+	for @projection-id-names -> $name {
+		die "Missing projection id '$name' for type {$type.^name}"
+			unless %ids{$name}:exists;
+	}
+	@projection-id-names.map: -> $name { %ids{$name} }
+}
+
+method !stream-key(Mu:U $type, @projection-ids) {
+	$type.^name ~ "\t" ~ @projection-ids.map(*.Str).join("\t")
+}
+
 =begin pod
 
 =head2 multi method emit
@@ -119,8 +148,8 @@ multi method emit($event) {
 	my ($type, $data) = self!serialize-event($event);
 	my $timestamp = DateTime.now.utc.Str;
 	$!dbh.execute(
-		'INSERT INTO events (type, ids, data, timestamp) VALUES (?, ?, ?, ?)',
-		$type, '', $data, $timestamp
+		'INSERT INTO events (event_type, aggregate_type, projection_ids, stream_key, stream_version, data, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+		$type, '', '[]', Nil, Nil, $data, '{}', $timestamp
 	);
 	my $sth = $!dbh.prepare('SELECT last_insert_rowid()');
 	$sth.execute;
@@ -153,17 +182,17 @@ multi method emit($event, :$type, :%ids!, :$current-version!) {
 		die "Only aggregations can emit events. Projections are read-only.";
 	}
 
-	my $key = $type.WHAT.^name;
-	my $id-key = %ids.sort.map({ .key ~ "\t" ~ .value }).join(";");
+	my @projection-ids = self!ordered-projection-ids($type, %ids);
+	my $stream-key = self!stream-key($type, @projection-ids);
 
 	# Get the current max version for this aggregate
 	my $sth = $!dbh.execute(
-		'SELECT MAX(CAST(id AS INTEGER)) as max_id FROM events WHERE type = ? AND ids = ?',
-		$key, $id-key
+		'SELECT MAX(stream_version) as max_version FROM events WHERE stream_key = ?',
+		$stream-key
 	);
 	my $row = $sth.row(:hash);
 	my $stored-version //= -1;
-	$stored-version = $row<max-id> // -1;
+	$stored-version = $row<max_version> // -1;
 
 	my $new-version = $current-version + 1;
 	if $stored-version != $current-version {
@@ -178,8 +207,8 @@ multi method emit($event, :$type, :%ids!, :$current-version!) {
 	my ($evt-type, $data) = self!serialize-event($event);
 	my $timestamp = DateTime.now.utc.Str;
 	$!dbh.execute(
-		'INSERT INTO events (type, ids, data, timestamp) VALUES (?, ?, ?, ?)',
-		$evt-type, $id-key, $data, $timestamp
+		'INSERT INTO events (event_type, aggregate_type, projection_ids, stream_key, stream_version, data, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+		$evt-type, $type.^name, Rakudo::Internals::JSON.to-json(@projection-ids), $stream-key, $new-version, $data, '{}', $timestamp
 	);
 	my $id = do { my $s = $!dbh.prepare('SELECT last_insert_rowid()'); $s.execute; $s.allrows()[0][0] };
 	$!event-id = $id;
@@ -263,7 +292,7 @@ List of event objects.
 
 =end pod
 
-method !fetch-events(%ids, %map) {
+method !fetch-events(%ids, %map, Int :$after-id = -1) {
 	my @events;
 	my @types = %map.keys.map({ .^name });
 
@@ -272,11 +301,11 @@ method !fetch-events(%ids, %map) {
 	}
 
 	my $placeholders = @types.map({ '?' }).join(',');
-	my $query = "SELECT type, ids, data, timestamp FROM events WHERE type IN ($placeholders) ORDER BY id";
+	my $query = "SELECT event_type, data FROM events WHERE id > ? AND event_type IN ($placeholders) ORDER BY id";
 
-	my $sth = $!dbh.execute($query, |@types);
+	my $sth = $!dbh.execute($query, $after-id, |@types);
 	while my $row = $sth.row(:hash) {
-		my $event = self!deserialize-event($row<type>, $row<data>);
+		my $event = self!deserialize-event($row<event_type>, $row<data>);
 		@events.push: $event;
 	}
 
@@ -305,8 +334,8 @@ Sequence of events after the given version.
 =end pod
 
 method get-events-after(Int $id, %ids, %map) {
-	my @events = self!fetch-events(%ids, %map);
-	@events.&get-events(%ids, %map).skip: $id + 1
+	my @events = self!fetch-events(%ids, %map, :after-id($id));
+	@events.&get-events(%ids, %map)
 }
 
 =begin pod
@@ -400,18 +429,20 @@ multi method store-cached-data(Mu:U $proj, %ids, %data, Int :$last-id!) {
 	$!dbh.execute(q:to/STATEMENT/);
 		CREATE TABLE IF NOT EXISTS projection_cache (
 			projection_type TEXT NOT NULL,
-			id_key TEXT NOT NULL,
+			projection_ids TEXT NOT NULL,
 			data TEXT NOT NULL,
-			last_id INTEGER NOT NULL,
-			PRIMARY KEY (projection_type, id_key)
+			last_event_id INTEGER NOT NULL,
+			PRIMARY KEY (projection_type, projection_ids)
 		)
 		STATEMENT
 
-	my $id-key = %ids.sort.map({ .key ~ "\t" ~ .value }).join(";");
+	my @projection-id-names = $proj.^projection-id-names;
+	my @projection-ids = @projection-id-names.map: -> $name { %ids{$name} };
+	my $projection-ids = Rakudo::Internals::JSON.to-json(@projection-ids);
 	my $data-json = Rakudo::Internals::JSON.to-json(%data);
 
-	my $stmt = $!dbh.prepare('INSERT OR REPLACE INTO projection_cache (projection_type, id_key, data, last_id) VALUES (?, ?, ?, ?)');
-	$stmt.execute($proj.^name, $id-key, $data-json, $last-id);
+	my $stmt = $!dbh.prepare('INSERT OR REPLACE INTO projection_cache (projection_type, projection_ids, data, last_event_id) VALUES (?, ?, ?, ?)');
+	$stmt.execute($proj.^name, $projection-ids, $data-json, $last-id);
 }
 
 =begin pod
@@ -436,24 +467,26 @@ method get-cached-data(Mu:U $proj, %ids) is rw {
 	$!dbh.execute(q:to/STATEMENT/);
 		CREATE TABLE IF NOT EXISTS projection_cache (
 			projection_type TEXT NOT NULL,
-			id_key TEXT NOT NULL,
+			projection_ids TEXT NOT NULL,
 			data TEXT NOT NULL,
-			last_id INTEGER NOT NULL,
-			PRIMARY KEY (projection_type, id_key)
+			last_event_id INTEGER NOT NULL,
+			PRIMARY KEY (projection_type, projection_ids)
 		)
 		STATEMENT
 
-	my $id-key = %ids.sort.map({ .key ~ "\t" ~ .value }).join(";");
+	my @projection-id-names = $proj.^projection-id-names;
+	my @projection-ids = @projection-id-names.map: -> $name { %ids{$name} };
+	my $projection-ids = Rakudo::Internals::JSON.to-json(@projection-ids);
 
 	my $sth = $!dbh.execute(
-		'SELECT data, last_id FROM projection_cache WHERE projection_type = ? AND id_key = ?',
-		$proj.^name, $id-key
+		'SELECT data, last_event_id FROM projection_cache WHERE projection_type = ? AND projection_ids = ?',
+		$proj.^name, $projection-ids
 	);
 
 	my $row = $sth.row(:hash);
 	if $row {
 		my %data = Rakudo::Internals::JSON.from-json($row<data>);
-		my $last-id = $row<last-id> // -1;
+		my $last-id = $row<last_event_id> // -1;
 		return %( data => %data, last-id => $last-id );
 	} else {
 		return %( data => %(), last-id => -1 );

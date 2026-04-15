@@ -29,11 +29,11 @@ submethod BUILD(Str :$path = ':memory:') {
 	$!db.do(q:to/SQL/);
 		CREATE TABLE IF NOT EXISTS projection_cache (
 			projection_type TEXT NOT NULL,
-			id_key TEXT NOT NULL,
+			projection_ids TEXT NOT NULL,
 			data TEXT NOT NULL,
-			last_id INTEGER NOT NULL,
+			last_event_id INTEGER NOT NULL,
 			updated_at TEXT NOT NULL,
-			PRIMARY KEY (projection_type, id_key)
+			PRIMARY KEY (projection_type, projection_ids)
 		)
 	SQL
 }
@@ -50,29 +50,33 @@ multi method store-cached-data($proj, Int :$last-id!) {
 }
 
 multi method store-cached-data(Mu:U $proj, %ids, %data, Int :$last-id!) {
-	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
+	my @projection-id-names = $proj.^projection-id-names;
+	my @projection-ids = @projection-id-names.map: -> $name { %ids{$name} };
+	my $projection-ids = Rakudo::Internals::JSON.to-json(@projection-ids);
 	my $type-name = $proj.^name;
 	my $data-json = Rakudo::Internals::JSON.to-json: %data;
 	my $now = DateTime.now.Str;
 	
-	$!db.execute: q:to/SQL/, $type-name, $id-key, $data-json, $last-id, $now;
-		INSERT OR REPLACE INTO projection_cache (projection_type, id_key, data, last_id, updated_at)
+	$!db.execute: q:to/SQL/, $type-name, $projection-ids, $data-json, $last-id, $now;
+		INSERT OR REPLACE INTO projection_cache (projection_type, projection_ids, data, last_event_id, updated_at)
 		VALUES (?, ?, ?, ?, ?)
 	SQL
 }
 
 method get-cached-data(Mu:U $proj, %ids) is rw {
-	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
+	my @projection-id-names = $proj.^projection-id-names;
+	my @projection-ids = @projection-id-names.map: -> $name { %ids{$name} };
+	my $projection-ids = Rakudo::Internals::JSON.to-json(@projection-ids);
 	my $type-name = $proj.^name;
 	
-	my $sth = $!db.prepare('SELECT data, last_id FROM projection_cache WHERE projection_type = ? AND id_key = ?');
-	$sth.execute($type-name, $id-key);
+	my $sth = $!db.prepare('SELECT data, last_event_id FROM projection_cache WHERE projection_type = ? AND projection_ids = ?');
+	$sth.execute($type-name, $projection-ids);
 	
 	my %return = last-id => -1, data => %();
 	my $row = $sth.row(:hash);
 	if $row {
 		my $data-json = $row<data>;
-		my $last-id = $row<last_id> // -1;
+		my $last-id = $row<last_event_id> // -1;
 		%return<last-id> = $last-id;
 		%return<data> = Rakudo::Internals::JSON.from-json: $data-json;
 	}

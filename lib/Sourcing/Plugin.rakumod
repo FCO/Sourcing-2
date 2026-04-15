@@ -24,7 +24,7 @@ for backward compatibility. New code should use the separate roles for more flex
 unit role Sourcing::Plugin;
 
 # Re-export EventStore methods (with default implementations for backward compatibility)
-method emit($, :$current-version) { ... }
+method emit($, :$type, :%ids, :$current-version) { ... }
 method get-events(%ids, %map) { ... }
 method get-events-after($, %, %) { ... }
 method supply { ... }

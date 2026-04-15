@@ -52,13 +52,8 @@ method compose(Mu $aggregation, |) {
 			my $curr-version-attr = $.^attributes.first: *.name eq '$!__current-version__';
 			my $current-version = $curr-version-attr.get_value(SELF) // -1;
 
-			my %ids = $aggregation.HOW.projection-id-pairs(SELF);
-
 			if $*SourcingConfig && !$*SourcingReplay {
-				$*SourcingConfig.emit: $new-event,
-					:type(SELF.WHAT),
-					:ids(%ids),
-					:$current-version;
+				$*SourcingConfig.emit: SELF, $new-event;
 				$curr-version-attr.set_value: SELF, $current-version + 1;
 			}
 
