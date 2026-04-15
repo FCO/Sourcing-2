@@ -76,8 +76,11 @@ The new version ID after replaying all events.
 
 method update($proj) {
 	my %ids = $proj.^projection-id-pairs;
+	my %cached = $*SourcingConfig.get-cached-data($proj.WHAT, %ids);
+	my $last-id = %cached<last-id> // -1;
+	my %cached-data = %cached<data> ~~ Associative ?? %(%cached<data>) !! %();
 
-	my $fresh = $proj.WHAT.new: |%ids;
+	my $fresh = $proj.WHAT.new: |%cached-data, |%ids;
 	my $proj-ids = $proj.^projection-ids.map(*.name).Set;
 	for $proj.^attributes.grep({ !$proj-ids{.name} && .name ne '$!__current-version__' && .has_accessor }) -> $attr {
 		$attr.set_value: $proj, $attr.get_value($fresh);
@@ -89,11 +92,11 @@ method update($proj) {
 
 	# Set $*SourcingReplay to prevent command execution during replay
 	my $*SourcingReplay = True;
-	my @initial-events = $*SourcingConfig.get-events-after: -1, %ids, %map;
+	my @initial-events = $*SourcingConfig.get-events-after: $last-id, %ids, %map;
 
 	$proj.apply: $_ for @initial-events;
 
-	$attr.set_value: $proj, my $new-id = @initial-events.elems - 1;
+	$attr.set_value: $proj, my $new-id = $last-id + @initial-events.elems;
 
 	$*SourcingConfig.store-cached-data: $proj, :last-id($new-id);
 

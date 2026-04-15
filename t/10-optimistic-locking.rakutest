@@ -210,4 +210,60 @@ Sourcing::Plugin::Memory.use;
     is $balance, 150, "Second deposit succeeded (no concurrent modification)";
 }
 
+# Test 8: emit can receive the aggregate instance and extract ids/version
+{
+    class SelfEmitEvent { has UInt $.id; has Int $.value }
+
+    aggregation SelfEmitAggregate {
+        has UInt $.id is projection-id;
+        has Int $.value = 0;
+        method apply(SelfEmitEvent $_) { $!value += .value }
+    }
+
+    my $memory = $*SourcingConfig;
+    my $aggregate = sourcing SelfEmitAggregate, :id(777);
+    my $event = SelfEmitEvent.new(:id(777), :value(10));
+
+    lives-ok {
+        $memory.emit($aggregate, $event)
+    }, "emit accepts aggregate instance and event";
+
+    my %cached := $memory.get-cached-data: SelfEmitAggregate, {id => 777};
+    is %cached<last-id>, 0, "version was incremented using aggregate-derived current version";
+}
+
+# Test 9: sourcing uses snapshot last-id when loading newer events
+{
+    class SnapshotEvent { has UInt $.id; has Int $.value }
+
+    class TrackingMemory is Sourcing::Plugin::Memory {
+        has Int @.seen-after-ids;
+        method get-events-after(Int $id, %ids, %map) {
+            @!seen-after-ids.push: $id;
+            callsame
+        }
+    }
+
+    my $tracking = TrackingMemory.use;
+
+    aggregation SnapshotAggregate {
+        has UInt $.id is projection-id;
+        has Int $.value = 0;
+        method apply(SnapshotEvent $_) { $!value += .value }
+    }
+
+    my $a = sourcing SnapshotAggregate, :id(1);
+    $a.snapshot-event: :value(3);
+
+    my $b = sourcing SnapshotAggregate, :id(1); # stores last-id = 0 in cache
+    is $b.value, 3, "aggregate reloaded with first event";
+
+    $b.snapshot-event: :value(4);
+    my $c = sourcing SnapshotAggregate, :id(1);
+    is $c.value, 7, "aggregate reloaded applying only events after snapshot";
+    is $tracking.seen-after-ids[*-1], 0, "second reload queried events after cached last-id";
+
+    Sourcing::Plugin::Memory.use;
+}
+
 done-testing;

@@ -20,10 +20,18 @@ and testing. Events are stored in memory and a supply emits them in order.
 unit class Sourcing::Plugin::EventStore::Memory;
 also does Sourcing::Plugin::EventStore;
 
+sub id-key(Mu:U $proj, %ids) {
+	my @projection-id-names = $proj.^projection-id-names;
+	@projection-id-names.map({ %ids{$_}.Str }).join("\t")
+}
+
 has Supplier $.supplier .= new;
 has Supply() $.supply    = $!supplier;
 has @.events;
+has @!stored-events;
+has Int $!event-id = -1;
 has %.store;
+has %.stream-versions;
 
 =begin pod
 
@@ -53,6 +61,15 @@ to the supplier for distribution.
 =end pod
 
 multi method emit($event) {
+	my $event-id = ++$!event-id;
+	@!stored-events.push: %(
+		id             => $event-id,
+		event          => $event,
+		aggregate-type => '',
+		projection-ids => [],
+		stream-version => Nil,
+		metadata       => %(),
+	);
 	$!supplier.emit: $event
 }
 
@@ -79,25 +96,32 @@ multi method emit($event, :$type, :%ids!, :$current-version!) {
 	unless $type ~~ Sourcing::Aggregation {
 		die "Only aggregations can emit events. Projections are read-only.";
 	}
-	my $key = $type.WHAT.^name;
-	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
-	my $store := %!store{$key};
-	$store{$id-key}:exists || ($store{$id-key} = Hash.new);
-	my atomicint $last-id = -1;
-	$store{$id-key}<last-id> //= $last-id;
-	my $current := $store{$id-key}<last-id>;
 	my $new-version = $current-version + 1;
-	my $old-value = cas($current, $current-version, $new-version);
-	unless $old-value == $current-version {
+	my @projection-id-names = $type.^projection-id-names;
+	my @projection-ids = @projection-id-names.map: -> $name { %ids{$name} };
+	my $stream-key = $type.^name ~ "\t" ~ @projection-ids.map(*.Str).join("\t");
+	my $stored-version = %!stream-versions{$stream-key} // -1;
+	unless $stored-version == $current-version {
 		Sourcing::X::OptimisticLocked.new(
 			:type($type),
 			:ids(%ids),
 			:expected-version($current-version),
-			:actual-version($old-value)
+			:actual-version($stored-version)
 		).throw
 	}
-	$store{$id-key}<last-id> = $new-version;
-	$.emit: $event
+	%!stream-versions{$stream-key} = $new-version;
+	my $event-id = ++$!event-id;
+	@!stored-events.push: %(
+		id             => $event-id,
+		event          => $event,
+		aggregate-type => $type.^name,
+		projection-ids => @projection-ids.Array,
+		stream-version => $new-version,
+		metadata       => %(),
+	);
+	my %cached := self.get-cached-data($type, %ids);
+	%cached<last-id> = $event-id;
+	$!supplier.emit: $event
 }
 
 =begin pod
@@ -120,8 +144,9 @@ Filtered list of matching events.
 
 =end pod
 
-sub get-events(@events, %ids, %map) {
-	@events.grep: -> $event {
+sub get-events(@records, %ids, %map) {
+	@records.grep: -> %record {
+		my $event = %record<event>;
 		next unless $event.WHAT ~~ %map.keys.any;
 		my $event-type = $event.WHAT;
 		my %event-map := %map{$event-type};
@@ -129,7 +154,7 @@ sub get-events(@events, %ids, %map) {
 			my $event-key = %event-map{$key};
 			$event."$event-key"() ~~ $value
 		}
-	}
+	}.map(*<event>)
 }
 
 =begin pod
@@ -151,7 +176,7 @@ Filtered list of events from the internal store.
 =end pod
 
 method get-events(%ids, %map) {
-	@!events.&get-events: %ids, %map
+	@!stored-events.&get-events: %ids, %map
 }
 
 =begin pod
@@ -176,7 +201,9 @@ Sequence of events after the given version.
 =end pod
 
 method get-events-after(Int $id, %ids, %map) {
-	@!events.&get-events(%ids, %map).skip: $id + 1
+	@!stored-events
+		.grep(*<id> > $id)
+		.&get-events(%ids, %map)
 }
 
 =begin pod
@@ -251,7 +278,7 @@ Low-level method to store projection data under a specific key.
 =end pod
 
 multi method store-cached-data(Mu:U $proj, %ids, %data, Int :$last-id!) {
-	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
+	my $id-key = id-key($proj, %ids);
 	%!store{$proj.^name}:exists || (%!store{$proj.^name} = Hash.new);
 	%!store{$proj.^name}{$id-key}<data> = %data;
 	%!store{$proj.^name}{$id-key}<last-id> = $last-id;
@@ -276,7 +303,7 @@ A hash containing C<last-id> and C<data> for the projection.
 =end pod
 
 method get-cached-data(Mu:U $proj, %ids) is rw {
-	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
+	my $id-key = id-key($proj, %ids);
 	%!store{$proj.^name}:exists || (%!store{$proj.^name} = Hash.new);
 	%!store{$proj.^name}{$id-key}:exists || (%!store{$proj.^name}{$id-key} = Hash.new);
 	my atomicint $last-id = -1;

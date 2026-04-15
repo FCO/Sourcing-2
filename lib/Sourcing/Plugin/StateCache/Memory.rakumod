@@ -18,6 +18,11 @@ and testing. Projection state is cached in memory for fast retrieval.
 unit class Sourcing::Plugin::StateCache::Memory;
 also does Sourcing::Plugin::StateCache;
 
+sub id-key(Mu:U $proj, %ids) {
+	my @projection-id-names = $proj.^projection-id-names;
+	@projection-id-names.map({ %ids{$_}.Str }).join("\t")
+}
+
 has %.store;
 
 =begin pod
@@ -80,7 +85,7 @@ Low-level method to store projection data under a specific key.
 =end pod
 
 multi method store-cached-data(Mu:U $proj, %ids, %data, Int :$last-id!) {
-	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
+	my $id-key = id-key($proj, %ids);
 	%!store{$proj.^name}:exists || (%!store{$proj.^name} = Hash.new);
 	%!store{$proj.^name}{$id-key}<data> = %data;
 	%!store{$proj.^name}{$id-key}<last-id> = $last-id;
@@ -105,7 +110,7 @@ A hash containing C<last-id> and C<data> for the projection.
 =end pod
 
 method get-cached-data(Mu:U $proj, %ids) is rw {
-	my $id-key = %ids.sort.map({.key ~ "\t" ~ .value}).join(";");
+	my $id-key = id-key($proj, %ids);
 	%!store{$proj.^name}:exists || (%!store{$proj.^name} = Hash.new);
 	%!store{$proj.^name}{$id-key}:exists || (%!store{$proj.^name}{$id-key} = Hash.new);
 	my atomicint $last-id = -1;
