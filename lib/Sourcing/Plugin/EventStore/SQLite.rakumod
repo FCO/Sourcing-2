@@ -56,6 +56,7 @@ submethod TWEAK(|) {
 	$!dbh.execute(q:to/STATEMENT/);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_events_stream_unique
 		ON events(stream_key, stream_version)
+		WHERE stream_key IS NOT NULL AND stream_version IS NOT NULL
 		STATEMENT
 
 	# Load existing events and emit them to the supply
@@ -118,6 +119,10 @@ method !serialize-event($event) {
 
 method !ordered-projection-ids(Mu:U $type, %ids) {
 	my @projection-id-names = $type.^projection-id-names;
+	for @projection-id-names -> $name {
+		die "Missing projection id '$name' for aggregate {$type.^name}"
+			unless %ids{$name}:exists;
+	}
 	@projection-id-names.map: -> $name { %ids{$name} }
 }
 

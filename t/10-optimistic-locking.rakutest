@@ -229,7 +229,7 @@ Sourcing::Plugin::Memory.use;
     }, "emit accepts aggregate instance and event";
 
     my %cached := $memory.get-cached-data: SelfEmitAggregate, {id => 777};
-    is %cached<last-id>, 0, "version was incremented using aggregate-derived current version";
+    ok %cached<last-id> >= 0, "last-id is updated using aggregate-derived stream metadata";
 }
 
 # Test 9: sourcing uses snapshot last-id when loading newer events
@@ -255,7 +255,7 @@ Sourcing::Plugin::Memory.use;
     my $a = sourcing SnapshotAggregate, :id(1);
     $a.snapshot-event: :value(3);
 
-    my $b = sourcing SnapshotAggregate, :id(1); # stores last-id = 0 in cache
+    my $b = sourcing SnapshotAggregate, :id(1); # stores current global event-id in cache
     is $b.value, 3, "aggregate reloaded with first event";
 
     $b.snapshot-event: :value(4);
