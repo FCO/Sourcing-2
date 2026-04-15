@@ -144,8 +144,8 @@ Filtered list of matching events.
 
 =end pod
 
-sub get-events(@records, %ids, %map) {
-	@records.grep: -> %record {
+sub get-events(@event-records, %ids, %map) {
+	@event-records.grep: -> %record {
 		my $event = %record<event>;
 		next unless $event.WHAT ~~ %map.keys.any;
 		my $event-type = $event.WHAT;

@@ -60,6 +60,9 @@ subtest "EventStore::SQLite stores and retrieves events" => {
     is @events.elems, 2, "retrieves matching events";
     is @events[0].name, "Ada", "returns events in order" if @events.elems >= 1;
 
+    my @after-zero = $store.get-events-after(0, { id => 1 }, %map);
+    is @after-zero.elems, 2, "returns matching events after global event id 0";
+
     my @after = $store.get-events-after(1, { id => 1 }, %map);
     is @after.elems, 1, "returns events after version";
     is @after[0].name, "Bob", "returns expected event after version" if @after.elems >= 1;
