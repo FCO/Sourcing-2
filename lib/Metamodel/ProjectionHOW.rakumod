@@ -77,7 +77,7 @@ The new version ID after replaying all events.
 method update($proj) {
 	my %ids = $proj.^projection-id-pairs;
 	my %cached = $*SourcingConfig.get-cached-data($proj.WHAT, %ids);
-	my $last-id = %cached<last-id> // -1;
+	my $last-id = %cached<snapshot-last-id> // (%cached<last-id> // -1);
 	my %cached-data = %cached<data> ~~ Associative ?? %(%cached<data>) !! %();
 
 	my $fresh = $proj.WHAT.new: |%cached-data, |%ids;

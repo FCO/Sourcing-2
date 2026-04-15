@@ -54,6 +54,7 @@ submethod TWEAK(|) {
 		STATEMENT
 
 	$!dbh.execute(q:to/STATEMENT/);
+		-- Enforces one write per stream/version pair for optimistic locking
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_events_stream_unique
 		ON events(stream_key, stream_version)
 		WHERE stream_key IS NOT NULL AND stream_version IS NOT NULL
@@ -120,7 +121,7 @@ method !serialize-event($event) {
 method !ordered-projection-ids(Mu:U $type, %ids) {
 	my @projection-id-names = $type.^projection-id-names;
 	for @projection-id-names -> $name {
-		die "Missing projection id '$name' for aggregate {$type.^name}"
+		die "Missing projection id '$name' for type {$type.^name}"
 			unless %ids{$name}:exists;
 	}
 	@projection-id-names.map: -> $name { %ids{$name} }
@@ -211,9 +212,6 @@ multi method emit($event, :$type, :%ids!, :$current-version!) {
 	);
 	my $id = do { my $s = $!dbh.prepare('SELECT last_insert_rowid()'); $s.execute; $s.allrows()[0][0] };
 	$!event-id = $id;
-	my %cached = self.get-cached-data($type, %ids);
-	my %data = %cached<data> ~~ Associative ?? %(%cached<data>) !! %();
-	self.store-cached-data($type, %ids, %data, :last-id($id));
 	$!supplier.emit: $event
 }
 

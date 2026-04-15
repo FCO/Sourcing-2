@@ -121,6 +121,7 @@ multi method emit($event, :$type, :%ids!, :$current-version!) {
 	);
 	my %cached := self.get-cached-data($type, %ids);
 	%cached<last-id> = $event-id;
+	%cached<is-stale> = True;
 	$!supplier.emit: $event
 }
 
@@ -282,6 +283,8 @@ multi method store-cached-data(Mu:U $proj, %ids, %data, Int :$last-id!) {
 	%!store{$proj.^name}:exists || (%!store{$proj.^name} = Hash.new);
 	%!store{$proj.^name}{$id-key}<data> = %data;
 	%!store{$proj.^name}{$id-key}<last-id> = $last-id;
+	%!store{$proj.^name}{$id-key}<snapshot-last-id> = $last-id;
+	%!store{$proj.^name}{$id-key}<is-stale> = False;
 }
 
 =begin pod
@@ -308,6 +311,8 @@ method get-cached-data(Mu:U $proj, %ids) is rw {
 	%!store{$proj.^name}{$id-key}:exists || (%!store{$proj.^name}{$id-key} = Hash.new);
 	my atomicint $last-id = -1;
 	%!store{$proj.^name}{$id-key}<last-id> //= $last-id;
+	%!store{$proj.^name}{$id-key}<snapshot-last-id> //= $last-id;
 	%!store{$proj.^name}{$id-key}<data> //= %();
+	%!store{$proj.^name}{$id-key}<is-stale> //= False;
 	%!store{$proj.^name}{$id-key}
 }

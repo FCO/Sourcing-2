@@ -93,7 +93,7 @@ sub sourcing(Sourcing::Projection:U $proj, *%ids) is export {
 	my %map{Mu:U} = $proj.^handled-events-map;
 	my $*SourcingReplay = True;
 	my %cached = $*SourcingConfig.get-cached-data($proj, %ids);
-	my $last-id = %cached<last-id> // -1;
+	my $last-id = %cached<snapshot-last-id> // (%cached<last-id> // -1);
 	my %cached-data = %cached<data> ~~ Associative ?? %(%cached<data>) !! %();
 	my @initial-events = $*SourcingConfig.get-events-after: $last-id, %ids, %map;
 

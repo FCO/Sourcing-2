@@ -237,7 +237,7 @@ method lookup(Sourcing::Saga:U $type: *%ids) {
 	my %map{Mu:U} = $type.^handled-events-map;
 	my $*SourcingReplay = True;
 	my %cached = $*SourcingConfig.get-cached-data($type, %ids);
-	my $last-id = %cached<last-id> // -1;
+	my $last-id = %cached<snapshot-last-id> // (%cached<last-id> // -1);
 	my %cached-data = %cached<data> ~~ Associative ?? %(%cached<data>) !! %();
 	my @initial-events = $*SourcingConfig.get-events-after: $last-id, %ids, %map;
 	
