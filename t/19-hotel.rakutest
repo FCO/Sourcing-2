@@ -1,0 +1,172 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+
+use lib 'examples';
+use Hotel::Events;
+use Hotel::RoomAggregate;
+use Hotel::BookingAggregate;
+use Hotel::RoomAvailabilityProjection;
+use Hotel::BookingSaga;
+
+plan 6;
+
+sub reset() { Sourcing::Plugin::Memory.use }
+
+subtest 'RoomAggregate — create and check state' => {
+    reset();
+
+    my $room = sourcing RoomAggregate, :room-id<r1>;
+    $room.create: :room-type<deluxe>, :floor(3), :price-per-night(150.0.Rat);
+
+    my $r = sourcing RoomAggregate, :room-id<r1>;
+    is $r.room-type,       'deluxe',    'room-type is set';
+    is $r.floor,           3,           'floor is set';
+    is $r.price-per-night, 150.0.Rat,  'price-per-night is set';
+    is $r.status,          'available', 'initial status is available';
+}
+
+subtest 'RoomAvailabilityProjection — tracks counts per room type' => {
+    reset();
+
+    my $room1 = sourcing RoomAggregate, :room-id<r1>;
+    $room1.create: :room-type<deluxe>, :floor(3), :price-per-night(150.0.Rat);
+
+    my $room2 = sourcing RoomAggregate, :room-id<r2>;
+    $room2.create: :room-type<deluxe>, :floor(4), :price-per-night(180.0.Rat);
+
+    my $room3 = sourcing RoomAggregate, :room-id<r3>;
+    $room3.create: :room-type<standard>, :floor(1), :price-per-night(90.0.Rat);
+
+    my $deluxe = sourcing RoomAvailabilityProjection, :room-type<deluxe>;
+    is $deluxe.total-count,     2, 'two deluxe rooms total';
+    is $deluxe.available-count, 2, 'both deluxe rooms available';
+    is $deluxe.min-price, 150.0.Rat, 'min price is 150';
+    is $deluxe.max-price, 180.0.Rat, 'max price is 180';
+
+    my $standard = sourcing RoomAvailabilityProjection, :room-type<standard>;
+    is $standard.total-count,     1, 'one standard room total';
+    is $standard.available-count, 1, 'standard room is available';
+}
+
+subtest 'BookingAggregate — calculates total price from nights' => {
+    reset();
+
+    my $booking = sourcing BookingAggregate, :booking-id<b1>;
+    $booking.create:
+        :guest-name<Alice>,
+        :room-id<r1>,
+        :check-in<2026-07-01>,
+        :check-out<2026-07-04>,
+        :price-per-night(100.0.Rat);
+
+    my $b = sourcing BookingAggregate, :booking-id<b1>;
+    is $b.total-price, 300.0.Rat, '3 nights × 100 = 300 total price';
+    is $b.status,      'pending', 'initial status is pending';
+}
+
+subtest 'BookingSaga — happy path: start → payment → check-in → check-out' => {
+    reset();
+
+    # Create the room first
+    my $room = sourcing RoomAggregate, :room-id<r10>;
+    $room.create: :room-type<suite>, :floor(5), :price-per-night(200.0.Rat);
+
+    # Run the saga
+    my $saga = sourcing BookingSaga, :saga-id<saga1>;
+    $saga.start-booking:
+        :room-id<r10>,
+        :booking-id<bk1>,
+        :guest-name<Bob>,
+        :check-in<2026-08-01>,
+        :check-out<2026-08-03>,
+        :price-per-night(200.0.Rat);
+
+    is $saga.state, 'awaiting-payment', 'state is awaiting-payment after start';
+
+    # Check room is reserved
+    my $r = sourcing RoomAggregate, :room-id<r10>;
+    is $r.status, 'reserved', 'room is reserved';
+
+    # Check booking is pending
+    my $b = sourcing BookingAggregate, :booking-id<bk1>;
+    is $b.status, 'pending', 'booking is pending before payment';
+
+    $saga.payment-received;
+    is $saga.state, 'confirmed', 'state is confirmed after payment';
+
+    my $b2 = sourcing BookingAggregate, :booking-id<bk1>;
+    is $b2.status, 'confirmed', 'booking is confirmed';
+
+    $saga.check-in;
+    is $saga.state, 'occupied', 'state is occupied after check-in';
+
+    my $r2 = sourcing RoomAggregate, :room-id<r10>;
+    is $r2.status, 'occupied', 'room is occupied after check-in';
+
+    $saga.check-out;
+    is $saga.state, 'completed', 'state is completed after check-out';
+
+    my $r3 = sourcing RoomAggregate, :room-id<r10>;
+    is $r3.status, 'available', 'room is available again after check-out';
+}
+
+subtest 'BookingSaga — payment timeout triggers rollback' => {
+    reset();
+
+    # Create room
+    my $room = sourcing RoomAggregate, :room-id<r20>;
+    $room.create: :room-type<deluxe>, :floor(2), :price-per-night(150.0.Rat);
+
+    # Check availability before booking
+    my $avail-before = sourcing RoomAvailabilityProjection, :room-type<deluxe>;
+    is $avail-before.available-count, 1, 'room is available before booking';
+
+    my $saga = sourcing BookingSaga, :saga-id<saga2>;
+    $saga.start-booking:
+        :room-id<r20>,
+        :booking-id<bk2>,
+        :guest-name<Carol>,
+        :check-in<2026-09-01>,
+        :check-out<2026-09-02>,
+        :price-per-night(150.0.Rat);
+
+    is $saga.state, 'awaiting-payment', 'awaiting payment after start';
+
+    # Room should be reserved, availability reduced
+    my $avail-during = sourcing RoomAvailabilityProjection, :room-type<deluxe>;
+    is $avail-during.available-count, 0, 'room no longer available while reserved';
+
+    # Simulate timeout firing (normally scheduled 1 hour out)
+    $saga.payment-timeout;
+    is $saga.state, 'cancelled', 'saga is cancelled after timeout';
+
+    # Undo blocks should have released the room
+    my $r = sourcing RoomAggregate, :room-id<r20>;
+    is $r.status, 'available', 'room is available again after rollback';
+
+    # Booking should be cancelled
+    my $b = sourcing BookingAggregate, :booking-id<bk2>;
+    is $b.status, 'cancelled', 'booking is cancelled after rollback';
+
+    # Availability restored
+    my $avail-after = sourcing RoomAvailabilityProjection, :room-type<deluxe>;
+    is $avail-after.available-count, 1, 'availability restored after rollback';
+}
+
+subtest 'RoomAggregate — cannot reserve already-reserved room' => {
+    reset();
+
+    my $room = sourcing RoomAggregate, :room-id<r30>;
+    $room.create: :room-type<standard>, :floor(1), :price-per-night(80.0.Rat);
+
+    my $r1 = sourcing RoomAggregate, :room-id<r30>;
+    $r1.reserve: :booking-id<bk10>, :guest-name<Dave>, :check-in<2026-10-01>, :check-out<2026-10-02>;
+
+    my $r2 = sourcing RoomAggregate, :room-id<r30>;
+    throws-like {
+        $r2.reserve: :booking-id<bk11>, :guest-name<Eve>, :check-in<2026-10-01>, :check-out<2026-10-02>
+    }, X::AdHoc, message => /:s not available/, 'cannot reserve already-reserved room';
+}
+
+done-testing;

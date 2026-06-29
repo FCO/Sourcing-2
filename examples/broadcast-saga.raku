@@ -165,6 +165,7 @@ saga BroadcastSaga {
 
     multi method apply(BroadcastCompleted $e) {
         $!status = 'completed';
+        $!channels-sent = $e.channels-broadcast;
     }
 
     multi method apply(BroadcastFailed $e) {
@@ -194,7 +195,7 @@ saga BroadcastSaga {
 
     =end pod
 
-    method start(Str :$channel, Str :$user, Str :$message) {
+    method broadcast(Str :$channel, Str :$user, Str :$message) is command {
         $!original-channel = $channel;
         $!user = $user;
         $!message = $message;
@@ -202,9 +203,6 @@ saga BroadcastSaga {
         $!channels-sent = 0;
         $!channels-failed = 0;
         @!successful-channels = ();
-
-        # Initialize saga in event store
-        self.start;
 
         # Start broadcasting to other channels
         self.broadcast-to-channels;
@@ -223,6 +221,7 @@ saga BroadcastSaga {
 
         for @channels -> $ch {
             self.send-to-channel: $ch;
+            return if $!status eq 'failed';
         }
 
         # Send confirmation to original user
@@ -254,26 +253,19 @@ saga BroadcastSaga {
                     :original-message($!message),
                     :reason($!failure-reason // "Broadcast cancelled");
             };
-        }
-        CATCH {
-            default {
-                my $e = $_;
-                # Send failed - emit failure event and rollback
-            my $fail-event = ChannelSendFailed.new:
-                :saga-id($!saga-id),
-                :$channel,
-                :reason($e.message),
-                :failed-at(DateTime.now);
 
-            $fail-event.emit: :type(self.WHAT);
-
-            $!channels-failed++;
-            $!failure-reason = "Failed to send to $channel: {$e.message}";
-            $!status = 'failed';
-
-            # Execute rollback - undo all successful sends
-            self.rollback;
-            return;
+            CATCH {
+                default {
+                    my $e = $_;
+                    $.channel-send-failed:
+                        :$channel,
+                        :reason($e.message),
+                        :failed-at(DateTime.now);
+                    $!channels-failed++;
+                    $!failure-reason = "Failed to send to $channel: {$e.message}";
+                    $!status = 'failed';
+                    self.rollback;
+                }
             }
         }
     }
@@ -293,28 +285,22 @@ saga BroadcastSaga {
             my $confirmation = "Your message was broadcast to {$!channels-sent} channel(s)";
             $original-ch.send-message: :message("$confirmation - {$!message}"), :sender("bot");
 
-            my $event = UserMessageSent.new:
-                :saga-id($!saga-id),
+            $.user-message-sent:
                 :user($!user),
                 :channel($!original-channel),
                 :sent-at(DateTime.now);
 
-            $event.emit: :type(self.WHAT);
-        }
-        CATCH {
-            default {
-                my $e = $_;
-                note "Warning: Could not confirm to user $!user: {$e.message}";
+            CATCH {
+                default {
+                    note "Warning: Could not confirm to user $!user: {$_.message}";
+                }
             }
         }
 
         # Mark as completed
-        my $complete-event = BroadcastCompleted.new:
-            :saga-id($!saga-id),
+        $.broadcast-completed:
             :channels-broadcast($!channels-sent),
             :completed-at(DateTime.now);
-
-        $complete-event.emit: :type(self.WHAT);
     }
 
     =begin pod
@@ -328,13 +314,10 @@ saga BroadcastSaga {
     method rollback() {
         callsame;  # Execute undo blocks (sends retractions)
 
-        my $rollback-event = BroadcastRolledBack.new:
-            :saga-id($!saga-id),
+        $.broadcast-rolled-back:
             :successful-sends($!successful-sends),
             :failed-channel($!failure-reason),
             :rolled-back-at(DateTime.now);
-
-        $rollback-event.emit: :type(self.WHAT);
     }
 }
 
@@ -354,15 +337,15 @@ say "";
 say "--- Demo 1: Successful Broadcast ---";
 say "Alice sends 'Hello everyone!' on #general\n";
 
-my $saga-id-1 = "broadcast-{DateTime.now.Int}";
-my $saga = BroadcastSaga.new: :saga-id($saga-id-1);
+my $saga-id1 = "broadcast-{now.Int}";
+my $saga = sourcing BroadcastSaga, :saga-id($saga-id1);
 
-$saga.start:
+$saga.broadcast:
     :channel('#general'),
     :user('alice'),
     :message('Hello everyone!');
 
-my $result = sourcing BroadcastSaga, :saga-id($saga-id-1);
+my $result = sourcing BroadcastSaga, :saga-id($saga-id1);
 say "Result: {$result.status}";
 say "Channels sent: {$result.channels-sent}";
 say "Failed sends: {$result.channels-failed}";
@@ -379,23 +362,23 @@ say "";
 say "--- Demo 2: Broadcast with Failure & Rollback ---";
 say "Bob sends 'Important announcement!' on #random\n";
 
-my $saga-id-2 = "broadcast-{DateTime.now.Int}";
-my $saga-2 = BroadcastSaga.new: :saga-id($saga-id-2);
+my $saga-id2 = "broadcast-{now.Int}-b";
+my $saga2 = sourcing BroadcastSaga, :saga-id($saga-id2);
 
 # Disconnect #announcements to simulate failure
-my $disc = ChannelAggregate.new: :channel('#announcements');
+my $disc = sourcing ChannelAggregate, :channel('#announcements');
 $disc.disconnect: :reason("Network error");
 
-$saga-2.start:
+$saga2.broadcast:
     :channel('#random'),
     :user('bob'),
     :message('Important announcement!');
 
-my $result-2 = sourcing BroadcastSaga, :saga-id($saga-id-2);
-say "Result: {$result-2.status}";
-say "Channels sent: {$result-2.channels-sent}";
-say "Failed sends: {$result-2.channels-failed}";
-say "Failure reason: {$result-2.failure-reason // 'N/A'}";
+my $result2 = sourcing BroadcastSaga, :saga-id($saga-id2);
+say "Result: {$result2.status}";
+say "Channels sent: {$result2.channels-sent}";
+say "Failed sends: {$result2.channels-failed}";
+say "Failure reason: {$result2.failure-reason // 'N/A'}";
 say "";
 
 say "Channel message counts after rollback:";
