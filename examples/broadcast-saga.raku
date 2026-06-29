@@ -189,7 +189,7 @@ saga BroadcastSaga {
 
     =begin pod
 
-    =head2 start
+    =head2 broadcast
 
     Initialize and begin the broadcast saga.
 
@@ -237,37 +237,39 @@ saga BroadcastSaga {
     =end pod
 
     method send-to-channel(Str $channel) {
-        my $ch-agg = sourcing ChannelAggregate, :$channel;
-
-        try {
-            $ch-agg.send-message: :message($!message), :sender($!user);
-
-            # Track success
-            @!successful-channels.push: $channel;
-            $!channels-sent++;
-
-            # Register compensation action
-            self.undo: -> {
-                my $retry-ch = sourcing ChannelAggregate, :$channel;
-                $retry-ch.send-retraction:
-                    :original-message($!message),
-                    :reason($!failure-reason // "Broadcast cancelled");
-            };
-
-            CATCH {
-                default {
-                    my $e = $_;
-                    $.channel-send-failed:
-                        :$channel,
-                        :reason($e.message),
-                        :failed-at(DateTime.now);
-                    $!channels-failed++;
-                    $!failure-reason = "Failed to send to $channel: {$e.message}";
-                    $!status = 'failed';
-                    self.rollback;
-                }
+        # No `try` here: a bare CATCH handles the whole method scope. When the
+        # send fails we record the failure and roll back, and the method then
+        # exits — which is exactly what we want, since there is no post-failure
+        # work left to do in this method. (`try` would only matter if we needed
+        # to keep running *after* the failed block.)
+        CATCH {
+            default {
+                my $e = $_;
+                $.channel-send-failed:
+                    :$channel,
+                    :reason($e.message),
+                    :failed-at(DateTime.now);
+                $!channels-failed++;
+                $!failure-reason = "Failed to send to $channel: {$e.message}";
+                $!status = 'failed';
+                self.rollback;
             }
         }
+
+        my $ch-agg = sourcing ChannelAggregate, :$channel;
+        $ch-agg.send-message: :message($!message), :sender($!user);
+
+        # Track success
+        @!successful-channels.push: $channel;
+        $!channels-sent++;
+
+        # Register compensation action
+        self.undo: -> {
+            my $retry-ch = sourcing ChannelAggregate, :$channel;
+            $retry-ch.send-retraction:
+                :original-message($!message),
+                :reason($!failure-reason // "Broadcast cancelled");
+        };
     }
 
     =begin pod
@@ -281,7 +283,18 @@ saga BroadcastSaga {
     method send-user-confirmation() {
         my $original-ch = sourcing ChannelAggregate, :channel($!original-channel);
 
+        # `try` IS needed here: a failed confirmation should only be logged,
+        # and we must STILL emit BroadcastCompleted below. A bare CATCH would
+        # exit the whole method on failure and skip the completion event, so we
+        # scope the containment to the `try` block and let execution continue
+        # after it.
         try {
+            CATCH {
+                default {
+                    note "Warning: Could not confirm to user $!user: {$_.message}";
+                }
+            }
+
             my $confirmation = "Your message was broadcast to {$!channels-sent} channel(s)";
             $original-ch.send-message: :message("$confirmation - {$!message}"), :sender("bot");
 
@@ -289,12 +302,6 @@ saga BroadcastSaga {
                 :user($!user),
                 :channel($!original-channel),
                 :sent-at(DateTime.now);
-
-            CATCH {
-                default {
-                    note "Warning: Could not confirm to user $!user: {$_.message}";
-                }
-            }
         }
 
         # Mark as completed
