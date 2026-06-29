@@ -3,6 +3,7 @@ use v6.e.PREVIEW;
 use Metamodel::AggregationHOW;
 use Sourcing::Saga;
 use Sourcing::Aggregation;
+use Sourcing::X::OptimisticLocked;
 
 =begin pod
 
@@ -31,8 +32,7 @@ method compose(Mu $saga, |) {
 	self.compose-saga-id($saga);
 	self.generate-aggregation-binding($saga);
 	callsame;
-	# TODO: Re-enable after fixing command wrapper issue
-	# self.wrap-methods-with-exception-handling($saga);
+	self.wrap-methods-with-exception-handling($saga);
 	self.generate-state-machine($saga);
 }
 
@@ -120,18 +120,18 @@ method wrap-methods-with-exception-handling(Mu $saga) {
 		next if $method.?is_wrapper;
 		next if $method.name.starts-with('^');
 		next if $method.name eq 'new';
-		
+
 		$method.wrap: method (|args) {
-			callsame;
 			CATCH {
+				when Sourcing::X::OptimisticLocked { .rethrow }
 				default {
 					self.rollback if self.^can('rollback');
-					# Transition to failed state if state attribute exists
 					my $state-attr = self.^attributes.first: *.name eq '$!state';
 					$state-attr.set_value(self, 'failed') if $state-attr;
 					.rethrow
 				}
 			}
+			callsame
 		}
 	}
 }

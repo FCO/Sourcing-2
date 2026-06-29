@@ -111,7 +111,7 @@ saga VerifyTimeoutSaga {
 saga ExceptionSaga {
 	has Str $.saga-id is projection-id;
 	has Str $.state = 'pending';
-	has Int @.compensations-emitted;
+	has @.compensations-emitted;
 
 	multi method apply(Any $e --> 'pending') { }
 
@@ -228,8 +228,10 @@ subtest 'verify-timeouts fires expired timeouts' => {
 subtest 'Exception triggers rollback' => {
 	my $saga = sourcing ExceptionSaga, :saga-id<exception-test>;
 
-	ok ExceptionSaga.^can('do-failing-action'), 'ExceptionSaga has do-failing-action method';
-	# Note: Exception handling not yet implemented, so we just test the method exists
+	throws-like { $saga.do-failing-action }, X::AdHoc, message => 'Simulated failure',
+		'exception is rethrown after rollback';
+	is-deeply $saga.compensations-emitted, ['undo'], 'undo blocks were executed on exception';
+	is $saga.state, 'failed', 'state transitions to failed on exception';
 }
 
 subtest 'TimeOutScheduled event rebuilds timeout state' => {
