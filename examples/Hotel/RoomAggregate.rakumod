@@ -35,6 +35,9 @@ aggregation RoomAggregate {
     }
 
     method create(Str :$room-type, Int :$floor, Rat :$price-per-night) {
+        # room-id is injected automatically: the generated room-created emit method
+        # prepends the projection-id ($!room-id, set when this aggregate is sourced)
+        # before these fields, so RoomCreated.room-id is always populated.
         $.room-created: :$room-type, :$floor, :$price-per-night;
     }
 
