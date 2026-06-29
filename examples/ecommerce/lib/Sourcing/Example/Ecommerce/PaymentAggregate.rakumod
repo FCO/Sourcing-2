@@ -20,19 +20,20 @@ The Payment aggregate manages payment processing. It handles:
 
 =end pod
 
-unit class Sourcing::Example::Ecommerce::PaymentAggregate is aggregation;
+unit aggregation Sourcing::Example::Ecommerce::PaymentAggregate;
 
 has Str $.payment-id is projection-id;
 has Str $.order-id;
-has Numeric $.amount = 0;
+has Rat $.amount = 0.0;
 has Str $.method;  # credit-card, debit, paypal
 has Str $.status = 'initiated';
 has Str $.authorization-code;
 has DateTime $.authorized-at;
 has DateTime $.captured-at;
 has DateTime $.failed-at;
-has Numeric $.captured-amount = 0;
-has Numeric $.refunded-amount = 0;
+has DateTime $.refunded-at;
+has Rat $.captured-amount = 0.0;
+has Rat $.refunded-amount = 0.0;
 has Str $.failure-reason;
 has Str $.refund-reason;
 
@@ -93,13 +94,13 @@ Command to initiate a new payment.
 
 =end pod
 
-method initiate(Str :$order-id, Numeric :$amount, Str :$method) {
+method initiate(Str :$order-id, Rat :$amount, Str :$method) {
     $!amount = $amount;
     $!method = $method;
     $!order-id = $order-id;
     
     self.payment-initiated(
-        :$payment-id,
+        :payment-id($!payment-id),
         :$order-id,
         :$amount,
         :$method
@@ -114,11 +115,11 @@ Command to authorize a payment.
 
 =end pod
 
-method authorize(Str :$authorization-code) {
+method authorize(Str :$authorization-code) is command {
     die "Payment must be pending to authorize" unless $!status eq 'pending';
     
     self.payment-authorized(
-        :$payment-id,
+        :payment-id($!payment-id),
         :$authorization-code,
         :authorized-at(DateTime.now)
     );
@@ -132,11 +133,11 @@ Command to capture a payment (collect funds).
 
 =end pod
 
-method capture(Numeric :$captured-amount = $!amount) {
+method capture(Rat :$captured-amount = $!amount) is command {
     die "Payment must be authorized to capture" unless $!status eq 'authorized';
     
     self.payment-captured(
-        :$payment-id,
+        :payment-id($!payment-id),
         :$captured-amount,
         :captured-at(DateTime.now)
     );
@@ -150,11 +151,11 @@ Command to mark payment as failed.
 
 =end pod
 
-method fail(Str :$reason) {
+method fail(Str :$reason) is command {
     die "Payment cannot fail in status: $!status" unless $!status eq 'pending' | 'authorized';
     
     self.payment-failed(
-        :$payment-id,
+        :payment-id($!payment-id),
         :$reason,
         :failed-at(DateTime.now)
     );
@@ -168,12 +169,12 @@ Command to refund a payment.
 
 =end pod
 
-method refund(Numeric :$refunded-amount, Str :$reason) {
+method refund(Rat :$refunded-amount, Str :$reason) is command {
     die "Payment must be captured to refund" unless $!status eq 'captured';
     die "Refund amount exceeds captured amount" if $refunded-amount > ($!captured-amount - $!refunded-amount);
     
     self.payment-refunded(
-        :$payment-id,
+        :payment-id($!payment-id),
         :$refunded-amount,
         :$reason,
         :refunded-at(DateTime.now)

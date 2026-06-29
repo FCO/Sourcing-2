@@ -93,7 +93,11 @@ method generate-aggregation-binding(Mu $saga) {
 		my Mu:U $type = $attr.type;
 		next if $type.^name eq 'Positional';
 		next if $type.^name.starts-with('Positional[');
-		next unless $type.^does(Sourcing::Aggregation);
+		# `.^does` blows up on parametric role groups (e.g. Numeric, Real) with
+		# "Too many positionals", so an attribute typed with one of those would
+		# otherwise crash compose. Such a type can never be an aggregation, so
+		# treat an unresolvable check as "not an aggregation" and skip it.
+		next unless try { $type.^does(Sourcing::Aggregation) };
 		my $name = $attr.name.substr(2);
 		my $attr-copy = $attr;
 		$saga.^add_method: $name, my method () {

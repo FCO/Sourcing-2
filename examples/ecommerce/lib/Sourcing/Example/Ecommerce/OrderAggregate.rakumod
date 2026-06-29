@@ -23,7 +23,7 @@ only being able to modify orders in the 'pending' state.
 
 =end pod
 
-unit class Sourcing::Example::Ecommerce::OrderAggregate is aggregation;
+unit aggregation Sourcing::Example::Ecommerce::OrderAggregate;
 
 has Str $.order-id is projection-id;
 has Str $.customer-id;
@@ -32,6 +32,7 @@ has Str $.status = 'created';
 has DateTime $.created-at = DateTime.now;
 has DateTime $.submitted-at;
 has DateTime $.cancelled-at;
+has DateTime $.completed-at;
 has Str $.cancellation-reason;
 
 =begin pod
@@ -46,7 +47,7 @@ multi method apply(OrderCreated $e) {
     $!order-id = $e.order-id;
     $!customer-id = $e.customer-id;
     $!created-at = $e.created-at // DateTime.now;
-    $!items = $e.items;
+    %!items = $e.items;
     $!status = $e.status // 'pending';
 }
 
@@ -102,7 +103,7 @@ method create-order(Str :$customer-id, :$items) {
         :order-id($!order-id),
         :$customer-id,
         :created-at(DateTime.now),
-        :%items
+        :items($items)
     );
 }
 
@@ -114,10 +115,10 @@ Command to add an item to the order.
 
 =end pod
 
-method add-item(Str :$item-id, Int :$quantity, Numeric :$unit-price) {
+method add-item(Str :$item-id, Int :$quantity, Rat :$unit-price) is command {
     die "Order must be in pending status to add items" unless $!status eq 'pending';
     self.order-item-added(
-        :$order-id,
+        :order-id($!order-id),
         :$item-id,
         :$quantity,
         :$unit-price
@@ -132,7 +133,7 @@ Command to submit the order for processing.
 
 =end pod
 
-method submit() {
+method submit() is command {
     die "Order must be pending to submit" unless $!status eq 'pending';
     die "Order must have at least one item" unless %.items.elems;
     self.order-submitted(
@@ -149,7 +150,7 @@ Command to cancel the order.
 
 =end pod
 
-method cancel(Str :$reason) {
+method cancel(Str :$reason) is command {
     die "Cannot cancel order in status: $!status" unless $!status eq 'pending' | 'submitted';
     self.order-cancelled(
         :order-id($!order-id),
@@ -166,7 +167,7 @@ Command to mark the order as completed.
 
 =end pod
 
-method complete() {
+method complete() is command {
     die "Can only complete submitted orders" unless $!status eq 'submitted';
     self.order-completed(
         :order-id($!order-id),

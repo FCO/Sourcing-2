@@ -1,7 +1,11 @@
 use v6.e.PREVIEW;
 
 use Sourcing;
+use Sourcing::Saga::Events;
 use Sourcing::Example::Ecommerce::Events;
+use Sourcing::Example::Ecommerce::OrderAggregate;
+use Sourcing::Example::Ecommerce::InventoryAggregate;
+use Sourcing::Example::Ecommerce::PaymentAggregate;
 
 =begin pod
 
@@ -22,34 +26,37 @@ This saga demonstrates:
 - Compensation for rollback
 - Timeout handling
 - Sending commands to multiple aggregates
-- Aggregation binding
 
 =end pod
 
-unit class Sourcing::Example::Ecommerce::OrderFulfillmentSaga is saga;
+unit saga Sourcing::Example::Ecommerce::OrderFulfillmentSaga;
 
 has Str $.saga-id is projection-id;
 has Str $.order-id;
 has Str $.status = 'started';
 has Str $.customer-id;
 has %.items;
-has Numeric $.total = 0;
+has Rat $.total = 0.0;
 has Str $.payment-id;
 has Bool $.inventory-reserved = False;
 has Bool $.payment-authorized = False;
 has Bool $.payment-captured = False;
 has Str $.failure-reason;
 
-# Aggregation bindings
-has Sourcing::Example::Ecommerce::OrderAggregate $.order;
-has Sourcing::Example::Ecommerce::InventoryAggregate $.inventory;
-has Sourcing::Example::Ecommerce::PaymentAggregate $.payment;
-
 =begin pod
 
 =head2 Method apply
 
-Handles events to rebuild saga state from event store.
+This saga is driven synchronously by command methods (start-fulfillment and
+the timeout handler), so its own event stream only ever contains the saga
+infrastructure events. Progress flags and status are updated directly by the
+command methods below rather than reconstructed from domain events.
+
+Note we deliberately do NOT declare apply handlers for the domain events
+(InventoryReserved, PaymentAuthorized, ...): those belong to the aggregates'
+streams, not the saga's, and declaring them here would make AggregationHOW
+generate emit methods whose kebab names collide with the boolean progress
+accessors (e.g. payment-authorized).
 
 =end pod
 
@@ -61,42 +68,6 @@ multi method apply(Sourcing::Saga::Events::SagaAggregationBound $e) {
     # Aggregation binding events handled automatically by metaclass
 }
 
-multi method apply(OrderSubmitted $e) {
-    $!order-id = $e.order-id;
-    $!status = 'processing';
-}
-
-multi method apply(InventoryReserved $e) {
-    $!inventory-reserved = True;
-}
-
-multi method apply(InventoryReleased $e) {
-    $!inventory-reserved = False;
-}
-
-multi method apply(PaymentInitiated $e) {
-    $!payment-id = $e.payment-id;
-    $!status = 'payment-processing';
-}
-
-multi method apply(PaymentAuthorized $e) {
-    $!payment-authorized = True;
-}
-
-multi method apply(PaymentCaptured $e) {
-    $!payment-captured = True;
-    $!status = 'completed';
-}
-
-multi method apply(PaymentFailed $e) {
-    $!failure-reason = "Payment failed: $e.reason()";
-    $!status = 'failed';
-}
-
-multi method apply(OrderCancelled $e) {
-    $!status = 'cancelled';
-}
-
 =begin pod
 
 =head2 Method start-fulfillment
@@ -106,16 +77,13 @@ This is called when an order is submitted.
 
 =end pod
 
-method start-fulfillment(Str :$order-id, Str :$customer-id, :%items, Numeric :$total) {
+method start-fulfillment(Str :$order-id, Str :$customer-id, :%items, Rat :$total) {
     $!order-id = $order-id;
     $!customer-id = $customer-id;
-    %.items = %items;
+    %!items = %items;
     $!total = $total;
     $!status = 'processing';
-    
-    # Bind aggregations for later use
-    self.bind-aggregate: 'order', Sourcing::Example::Ecommerce::OrderAggregate, :$order-id;
-    
+
     # Start the process by reserving inventory
     self.reserve-inventory;
 }
@@ -129,32 +97,19 @@ Step 1: Reserve inventory for all items in the order.
 =end pod
 
 method reserve-inventory() {
-    my $inventory = sourcing Sourcing::Example::Ecommerce::InventoryAggregate, :item-id($_.key) for %.items.keys;
-    
+    # Reserve stock for each item. If any reservation throws (e.g. insufficient
+    # stock), SagaHOW's exception wrapper calls rollback() — which releases the
+    # stock reserved so far — and re-throws, so no manual compensation
+    # bookkeeping is needed here.
     for %.items.kv -> $item-id, $item-data {
-        try {
-            $inventory.reserve: :order-id($!order-id), :quantity($item-data<quantity>);
-            $!inventory-reserved = True;
-            
-            # Register compensation for rollback
-            self.register-compensation: InventoryReleased.new(
-                :order-id($!order-id),
-                :$item-id,
-                quantity => $item-data<quantity>,
-                :released-at(DateTime.now)
-            );
-        }
-        catch {
-            $!failure-reason = "Failed to reserve inventory for item $item-id: $_";
-            $!status = 'failed';
-            self.rollback;
-            die $!failure-reason;
-        }
+        my $inventory = sourcing Sourcing::Example::Ecommerce::InventoryAggregate, :$item-id;
+        $inventory.reserve: :order-id($!order-id), :quantity($item-data<quantity>);
+        $!inventory-reserved = True;
     }
-    
+
     # Schedule timeout in case payment doesn't complete
     self.timeout-in: 'payment-timeout', :seconds(300);  # 5 minutes
-    
+
     # Proceed to payment
     self.initiate-payment;
 }
@@ -168,24 +123,12 @@ Step 2: Initiate payment for the order.
 =end pod
 
 method initiate-payment() {
-    $!payment-id = "pay-" ~ $!order-id ~ "-" ~ DateTime.now.Int;
-    
-    # Bind payment aggregate
-    self.bind-aggregate: 'payment', Sourcing::Example::Ecommerce::PaymentAggregate, :payment-id($!payment-id);
-    
-    # Create payment aggregate and initiate
-    my $payment = Sourcing::Example::Ecommerce::PaymentAggregate.new:
-        :$!payment-id, :order-id($!order-id), :amount($!total), :method<credit-card>;
-    
+    $!payment-id = "pay-" ~ $!order-id ~ "-" ~ DateTime.now.posix;
+
+    # Create the payment aggregate and initiate it
+    my $payment = sourcing Sourcing::Example::Ecommerce::PaymentAggregate, :payment-id($!payment-id);
     $payment.initiate: :order-id($!order-id), :amount($!total), :method<credit-card>;
-    
-    # Register compensation
-    self.register-compensation: PaymentRefunded.new(
-        :$!payment-id,
-        :refunded-amount($!total),
-        :reason("Order fulfillment failed")
-    );
-    
+
     # Proceed to authorization
     self.authorize-payment;
 }
@@ -264,25 +207,35 @@ Compensates for any completed steps when the saga fails.
 =end pod
 
 method rollback() {
-    # Release inventory if reserved
+    # SagaHOW wraps every saga method so that an uncaught exception triggers
+    # rollback() and re-throws. As the exception unwinds through each nested
+    # saga call, every level's wrapper invokes rollback() again on this same
+    # instance, so rollback must be idempotent: mark ourselves rolled-back up
+    # front and bail out on re-entry, and only compensate the steps whose flags
+    # are still set (clearing each as we go).
+    return if $!status eq 'rolled-back';
+    $!status = 'rolled-back';
+
+    # Release inventory if it was reserved
     if $!inventory-reserved {
         for %.items.kv -> $item-id, $item-data {
             my $inventory = sourcing Sourcing::Example::Ecommerce::InventoryAggregate, :$item-id;
             $inventory.release: :order-id($!order-id);
         }
+        $!inventory-reserved = False;
     }
-    
-    # Refund payment if captured
+
+    # Refund the payment if it was captured
     if $!payment-captured {
         my $payment = sourcing Sourcing::Example::Ecommerce::PaymentAggregate, :payment-id($!payment-id);
         $payment.refund: :refunded-amount($!total), :reason("Order fulfillment failed");
+        $!payment-captured = False;
     }
-    
-    # Cancel the order
+
+    # Cancel the order if it is still in a cancellable state
     if $!order-id {
         my $order = sourcing Sourcing::Example::Ecommerce::OrderAggregate, :order-id($!order-id);
-        $order.cancel: :reason($!failure-reason // "Unknown failure");
+        $order.cancel: :reason($!failure-reason // "Unknown failure")
+            if $order.status eq 'pending' | 'submitted';
     }
-    
-    $!status = 'rolled-back';
 }
