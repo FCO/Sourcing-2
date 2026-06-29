@@ -74,3 +74,4 @@ Every `is command` method is wrapped by `AggregationHOW` with a retry loop:
 - Custom exceptions live in `Sourcing::X::*` and inherit from `Exception`
 - Test files in `t/` use `use Test;` and end with `done-testing;`
 - Imports: `v6.e.PREVIEW` first (if needed), then core, external, internal
+- Language: all generated content — code, comments, docstrings/POD, documentation, commit messages — must be written in English. Chat replies may use another language.
