@@ -173,16 +173,21 @@ method wrap-apply-with-anti-event-capture(Mu $saga) {
 			unless $*SAGA-ROLLING-BACK {
 				my $anti = self.^find_method('anti-event');
 				if $anti && $anti.cando: \(self, $event) {
-					# Build the inverse event(s) under forced replay so the
-					# aggregate emit method only constructs them (never emits);
-					# the accumulator records each with its target type and ids.
-					my @recs = do {
-						my @*SourcingEvents;
+					# The handler returns the inverse event(s). Force replay so a
+					# handler that builds via an emit method only constructs (never
+					# emits). Discover each inverse's owning aggregation and ids the
+					# same way events are routed elsewhere, then queue it for rollback.
+					my $result = do {
 						my $*SourcingReplay = True;
 						self.anti-event($event);
-						@*SourcingEvents;
 					};
-					self.queue-compensation($_) for @recs;
+					for $result.list -> $inv {
+						my $type = self.^aggregation-for-event($inv.WHAT);
+						next if $type =:= Nil;
+						my %map{Mu:U} = $type.^handled-events-map;
+						my %ids = %map{$inv.WHAT}.map: -> $p { $p.key => $inv."{$p.value}"() };
+						self.queue-compensation: %( :event($inv), :$type, :ids(%ids) );
+					}
 				}
 			}
 			callsame

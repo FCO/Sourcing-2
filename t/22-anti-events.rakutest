@@ -41,10 +41,12 @@ saga ReservationSaga {
     # A failure event drives rollback — purely event-driven, no direct calls.
     multi method apply(RollbackRequested $e) { self.rollback }
 
-    # The declarative inverse: releasing exactly what this step reserved. No
-    # manual self.undo anywhere; the framework queues this automatically.
+    # The declarative inverse: just return the event that undoes the step.
+    # The framework discovers its owning aggregate (Inventory) and ids from the
+    # event itself, queues it automatically, and emits it on rollback. No manual
+    # self.undo, no aggregate plumbing.
     multi method anti-event(StepRequested $e) {
-        Inventory.new(:item($e.item)).stock-released: :amount($e.amount);
+        StockReleased.new: :item($e.item), :amount($e.amount);
     }
 }
 
