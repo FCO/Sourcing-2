@@ -139,9 +139,11 @@ C<$!state> attribute, it is set from the candidate's (defined, non-Exception)
 return value.
 
 A candidate without an C<on-state> tag is a wildcard (used by the saga's internal
-events); C<on-state> candidates take precedence. When no candidate matches the
-current state the event is a no-op, so duplicate or late events are dropped
-instead of crashing or compensating.
+events); C<on-state> candidates take precedence. When B<no> candidate matches the
+event in the current state it is treated as a protocol violation: the saga rolls
+back (emitting its queued anti-events) and moves to C<'failed'>. To accept an
+event in a state on purpose — for example to ignore a benign duplicate — declare
+a no-op candidate with the matching C<is on-state(...)>.
 
 =end pod
 
@@ -191,7 +193,17 @@ method wrap-apply-with-state-dispatch(Mu $saga) {
 			my $tc = evt-type $c;
 			(@group.grep: -> $d { my $td = evt-type $d; ($td ~~ $tc) && !($tc ~~ $td) }).elems == 0
 		}).head // @group.head;
-		return Nil without $chosen;
+
+		# No candidate handles this event in the current state: a saga protocol
+		# violation. Fail the same way an uncaught exception does — roll back
+		# (emitting the queued anti-events) and move to 'failed'. To accept an
+		# event in a state on purpose (e.g. a benign duplicate), declare a no-op
+		# candidate with the matching is on-state(...).
+		without $chosen {
+			self.rollback if self.^can('rollback');
+			$state-attr.set_value(self, 'failed') if $state-attr;
+			return Nil;
+		}
 
 		# Capture the inverse event(s) for rollback before the body runs.
 		if $has-anti && !$*SAGA-ROLLING-BACK {

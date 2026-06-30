@@ -13,8 +13,10 @@ use Hotel::BookingAggregate;
 # (SagaHOW sets `$.state` from it) and is tagged with `is on-state(...)`, which is
 # a dispatch key. Several apply candidates may handle the same event in different
 # states, and the saga picks the one matching the current state. An event that
-# matches no candidate for the current state is a no-op — duplicate or late events
-# are simply dropped (see the on-state('confirmed') PaymentReceived below).
+# matches NO candidate for the current state is a protocol violation: the saga
+# rolls back and fails. To accept an event in a state on purpose (e.g. a duplicate
+# payment) declare a no-op candidate for it — see the on-state('confirmed')
+# PaymentReceived below.
 #
 #   pending          --BookingRequested--> awaiting-payment   (reserve room + open booking)
 #   awaiting-payment --PaymentReceived---> confirmed          (confirm booking)

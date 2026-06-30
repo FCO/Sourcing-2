@@ -179,7 +179,7 @@ subtest 'RoomAggregate — cannot reserve already-reserved room' => {
     }, X::AdHoc, message => /:s not available/, 'cannot reserve already-reserved room';
 }
 
-subtest 'BookingSaga — an event with no candidate for the current state is a no-op' => {
+subtest 'BookingSaga — an event with no candidate for the current state rolls back' => {
     reset();
 
     my $room = sourcing RoomAggregate, :room-id<r40>;
@@ -196,16 +196,16 @@ subtest 'BookingSaga — an event with no candidate for the current state is a n
     );
 
     # GuestArrived only has a candidate for state 'confirmed'; the saga is still
-    # 'awaiting-payment', so no candidate is selected and the event is dropped —
-    # the guest is not checked in and nothing is rolled back.
+    # 'awaiting-payment'. No candidate matches, so this is a protocol violation:
+    # the saga rolls back (releasing the room, cancelling the booking) and fails.
     my $saga = dispatch 'saga4', GuestArrived.new(:saga-id<saga4>, :room-id<r40>, :booking-id<bk4>);
-    is $saga.state, 'awaiting-payment', 'unexpected event left the state unchanged';
-    is (sourcing RoomAggregate, :room-id<r40>).status, 'reserved',
-        'room stays reserved (no check-in, no rollback)';
-    is (sourcing BookingAggregate, :booking-id<bk4>).status, 'pending',
-        'booking untouched by the ignored event';
-    is (sourcing BookingSaga, :saga-id<saga4>).state, 'awaiting-payment',
-        'state stays awaiting-payment on replay';
+    is $saga.state, 'failed', 'unmatched event drives the saga to failed';
+    is (sourcing RoomAggregate, :room-id<r40>).status, 'available',
+        'room released by the rollback';
+    is (sourcing BookingAggregate, :booking-id<bk4>).status, 'cancelled',
+        'booking cancelled by the rollback';
+    is (sourcing BookingSaga, :saga-id<saga4>).state, 'failed',
+        'failed state is durable on replay';
 }
 
 subtest 'BookingSaga — per-state dispatch: a duplicate payment hits the no-op candidate' => {
