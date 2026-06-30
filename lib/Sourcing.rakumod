@@ -190,8 +190,14 @@ multi trait_mod:<is>(Method $r, Str :$projection-id) is export {
 
 =head3 trait_mod:<is>(Method $m, :$on-state)
 
-Marks a method as being guarded by a specific state. The method will only
-execute if the saga is in one of the specified states.
+Marks a method as being guarded by a specific state. The method only runs when
+the saga is in one of the given states. An event (or command) that arrives in
+the wrong state is a saga-protocol violation, so the guard does not run the body
+and instead drives the saga down its standard failure path — exactly what an
+uncaught exception in a saga method already does: it calls C<rollback()> (which
+emits the queued anti-events) and transitions the saga to the C<'failed'> state.
+The body is skipped, so no forward action is taken. On a non-saga method (one
+without C<rollback>) the guard falls back to throwing, as before.
 
 =end pod
 
@@ -199,8 +205,15 @@ multi trait_mod:<is>(Method $m, :$on-state) is export {
 	$m.wrap: method (|c) {
 		if $on-state ~~ $.state {
 			nextsame
+		} elsif self.^can('rollback') {
+			# Out-of-state event: compensate and fail instead of crashing, the
+			# same way SagaHOW handles an uncaught exception in a saga method.
+			self.rollback;
+			my $state-attr = self.^attributes.first: *.name eq '$!state';
+			$state-attr.set_value(self, 'failed') if $state-attr;
+			Nil
 		} else {
-			die "Command { $m.name } can only be called in states: {$on-state.raku}. Current state: $.state"
+			die "Method { $m.name } can only be called in states: {$on-state.raku}. Current state: $.state"
 		}
 	}
 }

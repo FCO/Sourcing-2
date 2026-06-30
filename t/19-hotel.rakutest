@@ -179,7 +179,7 @@ subtest 'RoomAggregate — cannot reserve already-reserved room' => {
     }, X::AdHoc, message => /:s not available/, 'cannot reserve already-reserved room';
 }
 
-subtest 'BookingSaga — state machine guards reject out-of-order events' => {
+subtest 'BookingSaga — out-of-order event rolls the saga back instead of crashing' => {
     reset();
 
     my $room = sourcing RoomAggregate, :room-id<r40>;
@@ -196,18 +196,20 @@ subtest 'BookingSaga — state machine guards reject out-of-order events' => {
     );
 
     # GuestArrived is guarded by is on-state('confirmed'); the saga is still
-    # 'awaiting-payment', so the state machine must reject it rather than acting.
-    throws-like {
-        my $s = sourcing BookingSaga, :saga-id<saga4>;
-        $s.apply: GuestArrived.new(:saga-id<saga4>, :room-id<r40>, :booking-id<bk4>);
-    }, X::AdHoc, message => /:s can only be called in states/,
-        'arrival before payment is rejected by the on-state guard';
+    # 'awaiting-payment'. The guard treats this protocol violation as a failure:
+    # it does not check the guest in — it rolls back and fails the saga.
+    my $saga = dispatch 'saga4', GuestArrived.new(:saga-id<saga4>, :room-id<r40>, :booking-id<bk4>);
+    is $saga.state, 'failed', 'unexpected event drives the saga to failed';
 
-    # The rejected event neither advanced the saga nor touched the room.
-    is (sourcing BookingSaga, :saga-id<saga4>).state, 'awaiting-payment',
-        'state is unchanged after the rejected event';
-    is (sourcing RoomAggregate, :room-id<r40>).status, 'reserved',
-        'room stays reserved (no check-in happened)';
+    # rollback emitted the queued anti-events: room released, booking cancelled.
+    is (sourcing RoomAggregate, :room-id<r40>).status, 'available',
+        'room released by the guard-triggered rollback';
+    is (sourcing BookingAggregate, :booking-id<bk4>).status, 'cancelled',
+        'booking cancelled by the guard-triggered rollback';
+
+    # The failure is durable: reconstruction replays to the same failed state.
+    is (sourcing BookingSaga, :saga-id<saga4>).state, 'failed',
+        'failed state is durable on replay';
 }
 
 done-testing;
