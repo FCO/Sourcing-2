@@ -54,3 +54,33 @@ class BookingCancelled is export {
     has Str $.booking-id is required;
     has Str $.reason     is required;
 }
+
+# Saga trigger events — these drive the BookingSaga and live on its own stream,
+# keyed by saga-id. The saga reacts to them via `apply` (event-driven), sourcing
+# the Room/Booking aggregates and issuing the corresponding commands.
+class BookingRequested is export {
+    has Str $.saga-id         is required;
+    has Str $.room-id         is required;
+    has Str $.booking-id      is required;
+    has Str $.guest-name      is required;
+    has Str $.check-in        is required;
+    has Str $.check-out       is required;
+    has Rat $.price-per-night is required;
+}
+
+class PaymentReceived is export {
+    has Str $.saga-id is required;
+}
+
+class GuestArrived is export {
+    has Str $.saga-id is required;
+}
+
+class GuestDeparted is export {
+    has Str $.saga-id is required;
+}
+
+# Signals that payment did not arrive in time; the saga rolls back on apply.
+class PaymentTimedOut is export {
+    has Str $.saga-id is required;
+}

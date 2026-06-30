@@ -13,6 +13,16 @@ plan 6;
 
 sub reset() { Sourcing::Plugin::Memory.use }
 
+# Idiomatic event-driven dispatch: rebuild the saga from its history (which
+# re-queues its compensation), apply the new event live, then persist it so
+# later reconstructions replay it. Returns the saga so callers can read state.
+sub dispatch(Str $saga-id, $event) {
+    my $s = sourcing BookingSaga, :$saga-id;
+    $s.apply($event);
+    $*SourcingConfig.emit: $event;
+    $s
+}
+
 subtest 'RoomAggregate — create and check state' => {
     reset();
 
@@ -65,24 +75,24 @@ subtest 'BookingAggregate — calculates total price from nights' => {
     is $b.status,      'pending', 'initial status is pending';
 }
 
-subtest 'BookingSaga — happy path: start → payment → check-in → check-out' => {
+subtest 'BookingSaga — happy path: request → payment → arrive → depart' => {
     reset();
 
     # Create the room first
     my $room = sourcing RoomAggregate, :room-id<r10>;
     $room.create: :room-type<suite>, :floor(5), :price-per-night(200.0.Rat);
 
-    # Run the saga
-    my $saga = sourcing BookingSaga, :saga-id<saga1>;
-    $saga.start-booking:
+    # Drive the saga purely by events.
+    my $saga = dispatch 'saga1', BookingRequested.new(
+        :saga-id<saga1>,
         :room-id<r10>,
         :booking-id<bk1>,
         :guest-name<Bob>,
         :check-in<2026-08-01>,
         :check-out<2026-08-03>,
-        :price-per-night(200.0.Rat);
-
-    is $saga.state, 'awaiting-payment', 'state is awaiting-payment after start';
+        :price-per-night(200.0.Rat),
+    );
+    is $saga.state, 'awaiting-payment', 'state is awaiting-payment after request';
 
     # Check room is reserved
     my $r = sourcing RoomAggregate, :room-id<r10>;
@@ -92,26 +102,26 @@ subtest 'BookingSaga — happy path: start → payment → check-in → check-ou
     my $b = sourcing BookingAggregate, :booking-id<bk1>;
     is $b.status, 'pending', 'booking is pending before payment';
 
-    $saga.payment-received;
+    $saga = dispatch 'saga1', PaymentReceived.new(:saga-id<saga1>);
     is $saga.state, 'confirmed', 'state is confirmed after payment';
 
     my $b2 = sourcing BookingAggregate, :booking-id<bk1>;
     is $b2.status, 'confirmed', 'booking is confirmed';
 
-    $saga.check-in;
-    is $saga.state, 'occupied', 'state is occupied after check-in';
+    $saga = dispatch 'saga1', GuestArrived.new(:saga-id<saga1>);
+    is $saga.state, 'occupied', 'state is occupied after arrival';
 
     my $r2 = sourcing RoomAggregate, :room-id<r10>;
     is $r2.status, 'occupied', 'room is occupied after check-in';
 
-    $saga.check-out;
-    is $saga.state, 'completed', 'state is completed after check-out';
+    $saga = dispatch 'saga1', GuestDeparted.new(:saga-id<saga1>);
+    is $saga.state, 'completed', 'state is completed after departure';
 
     my $r3 = sourcing RoomAggregate, :room-id<r10>;
     is $r3.status, 'available', 'room is available again after check-out';
 }
 
-subtest 'BookingSaga — payment timeout triggers rollback' => {
+subtest 'BookingSaga — payment timeout triggers anti-event rollback' => {
     reset();
 
     # Create room
@@ -122,30 +132,30 @@ subtest 'BookingSaga — payment timeout triggers rollback' => {
     my $avail-before = sourcing RoomAvailabilityProjection, :room-type<deluxe>;
     is $avail-before.available-count, 1, 'room is available before booking';
 
-    my $saga = sourcing BookingSaga, :saga-id<saga2>;
-    $saga.start-booking:
+    my $saga = dispatch 'saga2', BookingRequested.new(
+        :saga-id<saga2>,
         :room-id<r20>,
         :booking-id<bk2>,
         :guest-name<Carol>,
         :check-in<2026-09-01>,
         :check-out<2026-09-02>,
-        :price-per-night(150.0.Rat);
-
-    is $saga.state, 'awaiting-payment', 'awaiting payment after start';
+        :price-per-night(150.0.Rat),
+    );
+    is $saga.state, 'awaiting-payment', 'awaiting payment after request';
 
     # Room should be reserved, availability reduced
     my $avail-during = sourcing RoomAvailabilityProjection, :room-type<deluxe>;
     is $avail-during.available-count, 0, 'room no longer available while reserved';
 
-    # Simulate timeout firing (normally scheduled 1 hour out)
-    $saga.payment-timeout;
+    # Timeout fires before payment — the declarative anti-events run on rollback.
+    $saga = dispatch 'saga2', PaymentTimedOut.new(:saga-id<saga2>);
     is $saga.state, 'cancelled', 'saga is cancelled after timeout';
 
-    # Undo blocks should have released the room
+    # The queued anti-events should have released the room...
     my $r = sourcing RoomAggregate, :room-id<r20>;
     is $r.status, 'available', 'room is available again after rollback';
 
-    # Booking should be cancelled
+    # ...and cancelled the booking.
     my $b = sourcing BookingAggregate, :booking-id<bk2>;
     is $b.status, 'cancelled', 'booking is cancelled after rollback';
 

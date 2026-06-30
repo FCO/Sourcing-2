@@ -3,112 +3,91 @@ use Hotel::Events;
 use Hotel::RoomAggregate;
 use Hotel::BookingAggregate;
 
-# BookingSaga orchestrates the hotel reservation lifecycle:
-#   start-booking  → reserves room + creates booking + schedules timeout
-#   payment-received → confirms booking, cancels timeout
-#   check-in       → marks room as occupied
-#   check-out      → marks room as available again
+# BookingSaga orchestrates the hotel reservation lifecycle, fully event-driven:
+# it reacts to events through `apply` handlers, sourcing the Room and Booking
+# aggregates and issuing their commands. State transitions are returned from each
+# `apply` (the saga state machine sets `$.state` from the return value).
 #
-# If payment is not received before the timeout fires, the saga auto-cancels
-# and releases the room via the registered undo block.
+#   BookingRequested → reserve room + open booking      (state: awaiting-payment)
+#   PaymentReceived  → confirm booking                  (state: confirmed)
+#   GuestArrived     → mark room occupied               (state: occupied)
+#   GuestDeparted    → mark room available again        (state: completed)
+#   PaymentTimedOut  → rollback                          (state: cancelled)
 #
-# If any step throws an unexpected exception, SagaHOW's exception wrapper
-# automatically calls rollback() and transitions state to 'failed'.
+# Compensation is declarative: `anti-event(BookingRequested)` builds the inverse
+# of what BookingRequested does (release the room, cancel the booking). The
+# framework queues those inverses on every apply and emits them in reverse order
+# on rollback — no manual `self.undo`, no hand-written `rollback`.
+#
+# If any step throws an unexpected exception, SagaHOW's exception wrapper calls
+# rollback() (replaying the queued anti-events) and transitions state to 'failed'.
 
 saga BookingSaga {
-    has Str $.saga-id        is projection-id;
-    has Str $.state          = 'pending';
+    has Str $.saga-id    is projection-id;
+    has Str $.state      = 'pending';
     has Str $.room-id;
     has Str $.booking-id;
-    has Str $.guest-name;
-    has Str $.check-in;
-    has Str $.check-out;
-    has Rat $.price-per-night;
 
-    method start-booking(
-        Str :$room-id,
-        Str :$booking-id,
-        Str :$guest-name,
-        Str :$check-in,
-        Str :$check-out,
-        Rat :$price-per-night,
-    ) {
-        $!room-id       = $room-id;
-        $!booking-id    = $booking-id;
-        $!guest-name    = $guest-name;
-        $!check-in      = $check-in;
-        $!check-out     = $check-out;
-        $!price-per-night = $price-per-night;
+    # A booking request reserves the room and opens the booking record. The ids
+    # are remembered so later steps (payment, check-in/out) can reach the same
+    # aggregates after the saga is reconstructed.
+    multi method apply(BookingRequested $e) {
+        $!room-id    = $e.room-id;
+        $!booking-id = $e.booking-id;
 
-        # Step 1: reserve the room
-        my $room = sourcing RoomAggregate, :$room-id;
-        $room.reserve: :$booking-id, :$guest-name, :$check-in, :$check-out;
+        my $room = sourcing RoomAggregate, :room-id($e.room-id);
+        $room.reserve:
+            :booking-id($e.booking-id), :guest-name($e.guest-name),
+            :check-in($e.check-in), :check-out($e.check-out);
 
-        # Compensation: release room if anything goes wrong
-        self.undo: {
-            my $r = sourcing RoomAggregate, :room-id($!room-id);
-            $r.release: :booking-id($!booking-id), :reason('Booking saga cancelled');
-        };
+        my $booking = sourcing BookingAggregate, :booking-id($e.booking-id);
+        $booking.create:
+            :guest-name($e.guest-name), :room-id($e.room-id),
+            :check-in($e.check-in), :check-out($e.check-out),
+            :price-per-night($e.price-per-night);
 
-        # Step 2: create the booking record
-        my $booking = sourcing BookingAggregate, :$booking-id;
-        $booking.create: :$guest-name, :$room-id, :$check-in, :$check-out, :$price-per-night;
-
-        # Compensation: cancel booking if anything goes wrong
-        self.undo: {
-            my $b = sourcing BookingAggregate, :booking-id($!booking-id);
-            $b.cancel: :reason('Booking saga cancelled');
-        };
-
-        # Step 3: schedule auto-cancel timeout (1 hour to receive payment)
-        self.timeout-in: 'payment-timeout', :1hours;
-
-        $!state = 'awaiting-payment';
+        'awaiting-payment'
     }
 
-    # Called when payment is confirmed
-    method payment-received() {
-        die "Saga is not awaiting payment (state: $!state)" unless $!state eq 'awaiting-payment';
-
-        self.cancel-timeout: 'payment-timeout';
-
-        my $booking = sourcing BookingAggregate, :booking-id($!booking-id);
-        $booking.confirm;
-
-        $!state = 'confirmed';
+    # Payment confirmed: confirm the booking.
+    multi method apply(PaymentReceived $e) {
+        sourcing(BookingAggregate, :booking-id($!booking-id)).confirm;
+        'confirmed'
     }
 
-    # Called when the guest arrives at the hotel
-    method check-in() {
-        die "Booking is not confirmed (state: $!state)" unless $!state eq 'confirmed';
-
-        my $room = sourcing RoomAggregate, :room-id($!room-id);
-        $room.check-in: :booking-id($!booking-id);
-
-        $!state = 'occupied';
+    # Guest arrives: mark the room occupied.
+    multi method apply(GuestArrived $e) {
+        sourcing(RoomAggregate, :room-id($!room-id)).check-in: :booking-id($!booking-id);
+        'occupied'
     }
 
-    # Called when the guest leaves
-    method check-out() {
-        die "Guest is not checked in (state: $!state)" unless $!state eq 'occupied';
-
-        my $room = sourcing RoomAggregate, :room-id($!room-id);
-        $room.check-out: :booking-id($!booking-id);
-
-        $!state = 'completed';
+    # Guest leaves: free the room again.
+    multi method apply(GuestDeparted $e) {
+        sourcing(RoomAggregate, :room-id($!room-id)).check-out: :booking-id($!booking-id);
+        'completed'
     }
 
-    # Fired by the scheduler when the payment timeout expires
-    method payment-timeout() {
+    # Payment did not arrive in time: roll back. rollback() emits the queued
+    # anti-events (room released + booking cancelled) in reverse order.
+    multi method apply(PaymentTimedOut $e) {
         self.rollback;
-        $!state = 'cancelled';
+        'cancelled'
     }
 
-    method rollback() {
-        while @!undo-blocks {
-            my $block = @!undo-blocks.pop;
-            $block();
-        }
-        @!undo-blocks = [];
+    # Declarative compensation for a booking request: release the room and cancel
+    # the booking. We source the room to read its required `room-type`; the emit
+    # methods fill the projection-ids (room-id, booking-id). Two inverse events
+    # are produced — each is queued and replayed in reverse on rollback. We call
+    # the emit methods (room-released / booking-cancelled), not the commands, on
+    # purpose: a compensation undoes a fact that already happened and must bypass
+    # the forward command validation. No manual self.undo is needed.
+    multi method anti-event(BookingRequested $e) {
+        my $room = sourcing RoomAggregate, :room-id($e.room-id);
+        $room.room-released:
+            :booking-id($e.booking-id), :reason('Booking saga cancelled'),
+            room-type => $room.room-type;
+
+        sourcing(BookingAggregate, :booking-id($e.booking-id)).booking-cancelled:
+            :reason('Booking saga cancelled');
     }
 }
