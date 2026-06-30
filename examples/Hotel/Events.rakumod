@@ -68,19 +68,27 @@ class BookingRequested is export {
     has Rat $.price-per-night is required;
 }
 
+# Each trigger event carries the ids its handler needs, so the saga stays
+# stateless beyond its own state machine — every apply destructures what it uses.
 class PaymentReceived is export {
-    has Str $.saga-id is required;
+    has Str $.saga-id    is required;
+    has Str $.booking-id is required;
 }
 
 class GuestArrived is export {
-    has Str $.saga-id is required;
+    has Str $.saga-id    is required;
+    has Str $.room-id    is required;
+    has Str $.booking-id is required;
 }
 
 class GuestDeparted is export {
-    has Str $.saga-id is required;
+    has Str $.saga-id    is required;
+    has Str $.room-id    is required;
+    has Str $.booking-id is required;
 }
 
-# Signals that payment did not arrive in time; the saga rolls back on apply.
+# Signals that payment did not arrive in time; the saga rolls back on apply. It
+# needs no domain ids — the compensation was already queued from BookingRequested.
 class PaymentTimedOut is export {
     has Str $.saga-id is required;
 }

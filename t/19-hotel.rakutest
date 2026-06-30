@@ -9,7 +9,7 @@ use Hotel::BookingAggregate;
 use Hotel::RoomAvailabilityProjection;
 use Hotel::BookingSaga;
 
-plan 6;
+plan 7;
 
 sub reset() { Sourcing::Plugin::Memory.use }
 
@@ -102,19 +102,19 @@ subtest 'BookingSaga — happy path: request → payment → arrive → depart' 
     my $b = sourcing BookingAggregate, :booking-id<bk1>;
     is $b.status, 'pending', 'booking is pending before payment';
 
-    $saga = dispatch 'saga1', PaymentReceived.new(:saga-id<saga1>);
+    $saga = dispatch 'saga1', PaymentReceived.new(:saga-id<saga1>, :booking-id<bk1>);
     is $saga.state, 'confirmed', 'state is confirmed after payment';
 
     my $b2 = sourcing BookingAggregate, :booking-id<bk1>;
     is $b2.status, 'confirmed', 'booking is confirmed';
 
-    $saga = dispatch 'saga1', GuestArrived.new(:saga-id<saga1>);
+    $saga = dispatch 'saga1', GuestArrived.new(:saga-id<saga1>, :room-id<r10>, :booking-id<bk1>);
     is $saga.state, 'occupied', 'state is occupied after arrival';
 
     my $r2 = sourcing RoomAggregate, :room-id<r10>;
     is $r2.status, 'occupied', 'room is occupied after check-in';
 
-    $saga = dispatch 'saga1', GuestDeparted.new(:saga-id<saga1>);
+    $saga = dispatch 'saga1', GuestDeparted.new(:saga-id<saga1>, :room-id<r10>, :booking-id<bk1>);
     is $saga.state, 'completed', 'state is completed after departure';
 
     my $r3 = sourcing RoomAggregate, :room-id<r10>;
@@ -177,6 +177,37 @@ subtest 'RoomAggregate — cannot reserve already-reserved room' => {
     throws-like {
         $r2.reserve: :booking-id<bk11>, :guest-name<Eve>, :check-in<2026-10-01>, :check-out<2026-10-02>
     }, X::AdHoc, message => /:s not available/, 'cannot reserve already-reserved room';
+}
+
+subtest 'BookingSaga — state machine guards reject out-of-order events' => {
+    reset();
+
+    my $room = sourcing RoomAggregate, :room-id<r40>;
+    $room.create: :room-type<standard>, :floor(1), :price-per-night(100.0.Rat);
+
+    dispatch 'saga4', BookingRequested.new(
+        :saga-id<saga4>,
+        :room-id<r40>,
+        :booking-id<bk4>,
+        :guest-name<Frank>,
+        :check-in<2026-11-01>,
+        :check-out<2026-11-02>,
+        :price-per-night(100.0.Rat),
+    );
+
+    # GuestArrived is guarded by is on-state('confirmed'); the saga is still
+    # 'awaiting-payment', so the state machine must reject it rather than acting.
+    throws-like {
+        my $s = sourcing BookingSaga, :saga-id<saga4>;
+        $s.apply: GuestArrived.new(:saga-id<saga4>, :room-id<r40>, :booking-id<bk4>);
+    }, X::AdHoc, message => /:s can only be called in states/,
+        'arrival before payment is rejected by the on-state guard';
+
+    # The rejected event neither advanced the saga nor touched the room.
+    is (sourcing BookingSaga, :saga-id<saga4>).state, 'awaiting-payment',
+        'state is unchanged after the rejected event';
+    is (sourcing RoomAggregate, :room-id<r40>).status, 'reserved',
+        'room stays reserved (no check-in happened)';
 }
 
 done-testing;
