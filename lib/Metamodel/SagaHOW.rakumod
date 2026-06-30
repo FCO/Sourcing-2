@@ -34,6 +34,7 @@ method compose(Mu $saga, |) {
 	callsame;
 	self.wrap-methods-with-exception-handling($saga);
 	self.generate-state-machine($saga);
+	self.wrap-apply-with-anti-event-capture($saga);
 }
 
 =begin pod
@@ -120,7 +121,7 @@ method wrap-methods-with-exception-handling(Mu $saga) {
 	return if %wrapped-sagas{$key}:exists;
 	%wrapped-sagas{$key} = True;
 	
-	for $saga.^methods.grep({ .name ne 'apply' && .name ne 'rollback' }) -> $method {
+	for $saga.^methods.grep({ .name ne 'apply' && .name ne 'rollback' && .name ne 'anti-event' }) -> $method {
 		next if $method.?is_wrapper;
 		next if $method.name.starts-with('^');
 		next if $method.name eq 'new';
@@ -133,6 +134,55 @@ method wrap-methods-with-exception-handling(Mu $saga) {
 					my $state-attr = self.^attributes.first: *.name eq '$!state';
 					$state-attr.set_value(self, 'failed') if $state-attr;
 					.rethrow
+				}
+			}
+			callsame
+		}
+	}
+}
+
+=begin pod
+
+=head2 method wrap-apply-with-anti-event-capture
+
+Wraps each C<apply> candidate so that, before the user's apply body runs, the
+saga's matching C<anti-event(EventType)> handler (if any) builds the inverse
+event(s), which are queued for rollback. The handler builds each inverse by
+calling the target aggregate's emit method; this runs under forced
+C<$*SourcingReplay = True> (nothing is emitted) with an C<@*SourcingEvents>
+accumulator that collects each built event together with its target type and
+ids. Because this runs inside C<apply> — which replays on every reconstruction —
+the compensation queue is rebuilt durably with no extra persistence.
+
+=end pod
+
+method wrap-apply-with-anti-event-capture(Mu $saga) {
+	my $key = $saga.^name ~ '-anti-event';
+	return if %wrapped-sagas{$key}:exists;
+	%wrapped-sagas{$key} = True;
+
+	# Nothing to do unless this saga declares anti-event handlers.
+	return unless $saga.^methods.first: *.name eq 'anti-event';
+
+	for $saga.^methods.grep: *.name eq 'apply' -> $method {
+		next if $method.^name ~~ / 'Proto' | 'Multi' /;
+		next if $method.?is_wrapper;
+
+		$method.wrap: my method (|args) {
+			my $event = args[0];
+			unless $*SAGA-ROLLING-BACK {
+				my $anti = self.^find_method('anti-event');
+				if $anti && $anti.cando: \(self, $event) {
+					# Build the inverse event(s) under forced replay so the
+					# aggregate emit method only constructs them (never emits);
+					# the accumulator records each with its target type and ids.
+					my @recs = do {
+						my @*SourcingEvents;
+						my $*SourcingReplay = True;
+						self.anti-event($event);
+						@*SourcingEvents;
+					};
+					self.queue-compensation($_) for @recs;
 				}
 			}
 			callsame

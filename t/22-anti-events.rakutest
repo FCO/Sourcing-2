@@ -1,0 +1,112 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+
+# Exercises declarative anti-events: a saga declares `anti-event(EventType)`
+# returning the inverse of what it does when it applies that event, and the
+# framework automatically queues the inverse on every apply and emits the queued
+# inverses in reverse order on rollback. No manual `self.undo` is used anywhere.
+#
+# The saga is driven the idiomatic, event-driven way: `sourcing` rebuilds the
+# saga from its stream, then the new event is applied live. Because anti-event
+# capture happens inside `apply`, the compensation queue is rebuilt on every
+# reconstruction, so it survives reload with no extra persistence.
+
+# Domain events (owned by the Inventory aggregate stream).
+class StockReserved     { has Str $.item; has Int $.amount }
+class StockReleased     { has Str $.item; has Int $.amount }
+# Saga trigger events (the saga's own stream, keyed by saga-id).
+class StepRequested     { has Str $.saga-id; has Str $.item; has Int $.amount }
+class RollbackRequested { has Str $.saga-id }
+
+aggregation Inventory {
+    has Str $.item is projection-id;
+    has Int $.reserved = 0;
+
+    multi method apply(StockReserved $e) { $!reserved += $e.amount }
+    multi method apply(StockReleased $e) { $!reserved -= $e.amount }
+
+    method reserve(Int :$amount) is command { $.stock-reserved: :$amount }
+    method release(Int :$amount) is command { $.stock-released: :$amount }
+}
+
+saga ReservationSaga {
+    has Str $.saga-id is projection-id;
+
+    # Reacting to a step reserves stock on the inventory aggregate.
+    multi method apply(StepRequested $e) {
+        sourcing(Inventory, :item($e.item)).reserve: :amount($e.amount);
+    }
+
+    # A failure event drives rollback — purely event-driven, no direct calls.
+    multi method apply(RollbackRequested $e) { self.rollback }
+
+    # The declarative inverse: releasing exactly what this step reserved. No
+    # manual self.undo anywhere; the framework queues this automatically.
+    multi method anti-event(StepRequested $e) {
+        Inventory.new(:item($e.item)).stock-released: :amount($e.amount);
+    }
+}
+
+constant Saga = ReservationSaga;
+constant Inv  = Inventory;
+
+# Clean event-driven dispatch: rebuild from history, apply the new event live,
+# then persist it so later reconstructions replay it.
+sub dispatch(Str $saga-id, $event) {
+    my $s = sourcing Saga, :$saga-id;
+    $s.apply($event);
+    $*SourcingConfig.emit: $event;
+}
+
+sub released-amounts() {
+    my %map{Mu:U};
+    %map{StockReleased} = { item => 'item' };
+    $*SourcingConfig.get-events({ item => 'WIDGET' }, %map).map(*.amount);
+}
+
+plan 3;
+
+subtest 'forward reactions reserve stock (no compensation yet)' => {
+    Sourcing::Plugin::Memory.use;
+
+    dispatch 'S1', StepRequested.new(:saga-id<S1>, :item<WIDGET>, :amount(2));
+    dispatch 'S1', StepRequested.new(:saga-id<S1>, :item<WIDGET>, :amount(3));
+
+    is (sourcing Inv, :item<WIDGET>).reserved, 5, 'both steps reserved stock (2 + 3)';
+    is released-amounts().elems, 0, 'nothing compensated before rollback';
+};
+
+subtest 'event-triggered rollback auto-emits the inverses in reverse order' => {
+    Sourcing::Plugin::Memory.use;
+
+    dispatch 'S1', StepRequested.new(:saga-id<S1>, :item<WIDGET>, :amount(2));
+    dispatch 'S1', StepRequested.new(:saga-id<S1>, :item<WIDGET>, :amount(3));
+
+    # Rollback is triggered by an event and runs on a freshly-sourced saga whose
+    # compensation queue was rebuilt purely by replaying the StepRequested
+    # events — proving durability with no manual undo and no persistence.
+    dispatch 'S1', RollbackRequested.new(:saga-id<S1>);
+
+    is (sourcing Inv, :item<WIDGET>).reserved, 0, 'all reserved stock released by rollback';
+    is released-amounts().join(','), '3,2',
+        'inverses emitted in reverse order (last reserved is released first)';
+};
+
+subtest 'replaying the rollback does not double-compensate' => {
+    Sourcing::Plugin::Memory.use;
+
+    dispatch 'S1', StepRequested.new(:saga-id<S1>, :item<WIDGET>, :amount(2));
+    dispatch 'S1', StepRequested.new(:saga-id<S1>, :item<WIDGET>, :amount(3));
+    dispatch 'S1', RollbackRequested.new(:saga-id<S1>);
+
+    is (sourcing Inv, :item<WIDGET>).reserved, 0, 'compensated once';
+
+    # A fresh reconstruction replays RollbackRequested, which rebuilds the
+    # "rolled back" state, so a further rollback is a no-op (replay-safe).
+    my $again = sourcing Saga, :saga-id<S1>;
+    $again.rollback;
+    is (sourcing Inv, :item<WIDGET>).reserved, 0, 'no double compensation on replay';
+};
+
+done-testing;
