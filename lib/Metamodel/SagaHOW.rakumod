@@ -24,7 +24,6 @@ declaration syntax. In addition to aggregation functionality, it provides:
 
 unit class Metamodel::SagaHOW is Metamodel::AggregationHOW;
 
-my $ON-STATE-ATTR = Attribute.^lookup('$!on-state');
 my %wrapped-sagas;
 
 method compose(Mu $saga, |) {
@@ -33,8 +32,7 @@ method compose(Mu $saga, |) {
 	self.generate-aggregation-binding($saga);
 	callsame;
 	self.wrap-methods-with-exception-handling($saga);
-	self.generate-state-machine($saga);
-	self.wrap-apply-with-anti-event-capture($saga);
+	self.wrap-apply-with-state-dispatch($saga);
 }
 
 =begin pod
@@ -49,34 +47,6 @@ method compose-saga-id(Mu $saga) {
 	my @ids = $saga.^attributes.grep: *.?is-projection-id;
 	die "Saga { $saga.^name } must have exactly one projection-id attribute"
 	unless @ids == 1;
-}
-
-=begin pod
-
-=head2 method generate-state-machine
-
-Wraps apply methods to update the state based on return type declarations.
-
-=end pod
-
-method generate-state-machine(Mu $saga) {
-	my $key = $saga.^name;
-	return if %wrapped-sagas{$key}:exists;
-	%wrapped-sagas{$key} = True;
-	
-	my $state-attr = $saga.^attributes.first: *.name eq '$!state';
-	return unless $state-attr;
-
-	for $saga.^methods.grep: *.name eq 'apply' -> $method {
-		next if $method.^name ~~ / 'Proto' | 'Multi' /;
-		next if $method.?is_wrapper;
-		my $attr = $state-attr;
-		$method.wrap: my method (|args) {
-			my $result = callsame;
-			$attr.set_value: self, $result if $result.defined && $result !~~ Exception;
-			$result
-		}, :replace;
-	}
 }
 
 =begin pod
@@ -120,7 +90,7 @@ method wrap-methods-with-exception-handling(Mu $saga) {
 	my $key = $saga.^name ~ '-exception';
 	return if %wrapped-sagas{$key}:exists;
 	%wrapped-sagas{$key} = True;
-	
+
 	for $saga.^methods.grep({ .name ne 'apply' && .name ne 'rollback' && .name ne 'anti-event' }) -> $method {
 		next if $method.?is_wrapper;
 		next if $method.name.starts-with('^');
@@ -143,49 +113,104 @@ method wrap-methods-with-exception-handling(Mu $saga) {
 
 =begin pod
 
-=head2 method wrap-apply-with-anti-event-capture
+=head2 method wrap-apply-with-state-dispatch
 
-Wraps each C<apply> candidate so that, before the user's apply body runs, the
-saga's matching C<anti-event(EventType)> handler (if any) builds the inverse
-event(s), which are queued for rollback. The handler builds each inverse by
-calling the target aggregate's emit method; this runs under forced
-C<$*SourcingReplay = True> (nothing is emitted) with an C<@*SourcingEvents>
-accumulator that collects each built event together with its target type and
-ids. Because this runs inside C<apply> — which replays on every reconstruction —
-the compensation queue is rebuilt durably with no extra persistence.
+Replaces the saga's C<apply> dispatch with a single state-aware dispatcher and,
+in the same place, runs the state-machine transition and anti-event capture.
+
+A saga may declare several C<apply> candidates for the same event type, each
+tagged with a different C<is on-state(...)>. Native multi-dispatch cannot
+disambiguate same-signature candidates, and C<.wrap> hides a candidate's
+signature and its C<on-state> tag — so per-candidate wrapping cannot be combined
+with this selection. Instead the C<apply> proto is wrapped once: it reads the
+pristine candidates (correct signatures and C<on-state> tags), picks the one
+whose tag matches the saga's current state, and invokes its body directly.
+
+For the selected candidate this dispatcher also:
+
+=item Builds and queues the inverse via the matching C<anti-event(EventType)>
+handler (if any) B<before> running the body — under forced C<$*SourcingReplay>
+with an C<@*SourcingEvents> accumulator, so the emit methods only construct the
+inverse events and never emit. Because this runs inside C<apply>, which replays
+on every reconstruction, the compensation queue is rebuilt durably.
+
+=item Applies the state-machine transition afterwards: if the saga has a
+C<$!state> attribute, it is set from the candidate's (defined, non-Exception)
+return value.
+
+A candidate without an C<on-state> tag is a wildcard (used by the saga's internal
+events); C<on-state> candidates take precedence. When no candidate matches the
+current state the event is a no-op, so duplicate or late events are dropped
+instead of crashing or compensating.
 
 =end pod
 
-method wrap-apply-with-anti-event-capture(Mu $saga) {
-	my $key = $saga.^name ~ '-anti-event';
+method wrap-apply-with-state-dispatch(Mu $saga) {
+	my $key = $saga.^name ~ '-state-dispatch';
 	return if %wrapped-sagas{$key}:exists;
 	%wrapped-sagas{$key} = True;
 
-	# Nothing to do unless this saga declares anti-event handlers.
-	return unless $saga.^methods.first: *.name eq 'anti-event';
+	my $proto = $saga.^find_method: 'apply';
+	return unless $proto;
 
-	for $saga.^methods.grep: *.name eq 'apply' -> $method {
-		next if $method.^name ~~ / 'Proto' | 'Multi' /;
-		next if $method.?is_wrapper;
+	# Capture the pristine candidates up front: their signatures (for event-type
+	# matching) and on-state tags are intact, and calling them runs just the body.
+	my @candidates = $proto.candidates;
+	my $state-attr = $saga.^attributes.first: *.name eq '$!state';
+	my $has-anti   = ?($saga.^methods.first: *.name eq 'anti-event');
 
-		$method.wrap: my method (|args) {
-			my $event = args[0];
-			unless $*SAGA-ROLLING-BACK {
-				my $anti = self.^find_method('anti-event');
-				if $anti && $anti.cando: \(self, $event) {
-					# Build the inverse event(s) under forced replay so the
-					# aggregate emit method only constructs them (never emits);
-					# the accumulator records each with its target type and ids.
-					my @recs = do {
-						my @*SourcingEvents;
-						my $*SourcingReplay = True;
-						self.anti-event($event);
-						@*SourcingEvents;
-					};
-					self.queue-compensation($_) for @recs;
-				}
-			}
-			callsame
+	# The handled event type of a candidate (first non-invocant positional).
+	# Note: a Parameter's .type is a type object (undefined), so `//` must not be
+	# used here — it would treat every type as "missing" and collapse to Mu.
+	my sub evt-type($c) {
+		with $c.signature.params.first({ !.invocant && !.named }) {
+			.type
+		} else {
+			Mu
 		}
 	}
+
+	$proto.wrap: my method (|args) {
+		my $event = args[0];
+
+		# Select the candidate for this event type whose on-state matches the
+		# current state; fall back to the untagged (wildcard) candidates.
+		my @cands    = @candidates.grep: *.cando: \(self, $event);
+		my @stated   = @cands.grep: -> $c { $c.?on-state.defined && (self.state ~~ any($c.on-state.list)) };
+		my @wildcard = @cands.grep: -> $c { !$c.?on-state.defined };
+		my @group    = @stated || @wildcard;     # state-specific candidates win over wildcards
+
+		# Within the group prefer the most specific event type, so a catch-all
+		# apply(Any) never shadows a specific handler (matching native dispatch).
+		# Keep a candidate when no other has a strictly narrower type. Strict
+		# subtype is tested with smartmatch both ways ($td is-a $tc but not vice
+		# versa) — identity (=:=) is unreliable here because Parameter.type hands
+		# back a fresh wrapper each call. Count with .elems, not .first: a matching
+		# type object is falsy, so the value .first returns can't signal a hit.
+		my $chosen = (@group.grep: -> $c {
+			my $tc = evt-type $c;
+			(@group.grep: -> $d { my $td = evt-type $d; ($td ~~ $tc) && !($tc ~~ $td) }).elems == 0
+		}).head // @group.head;
+		return Nil without $chosen;
+
+		# Capture the inverse event(s) for rollback before the body runs.
+		if $has-anti && !$*SAGA-ROLLING-BACK {
+			my $anti = self.^find_method('anti-event');
+			if $anti && $anti.cando: \(self, $event) {
+				my @recs = do {
+					my @*SourcingEvents;
+					my $*SourcingReplay = True;
+					self.anti-event($event);
+					@*SourcingEvents;
+				};
+				self.queue-compensation($_) for @recs;
+			}
+		}
+
+		# Run the chosen body, then apply the state-machine transition.
+		my $result = $chosen(self, $event);
+		$state-attr.set_value(self, $result)
+			if $state-attr && $result.defined && $result !~~ Exception;
+		$result
+	};
 }

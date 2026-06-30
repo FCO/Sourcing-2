@@ -9,7 +9,7 @@ use Hotel::BookingAggregate;
 use Hotel::RoomAvailabilityProjection;
 use Hotel::BookingSaga;
 
-plan 7;
+plan 8;
 
 sub reset() { Sourcing::Plugin::Memory.use }
 
@@ -179,7 +179,7 @@ subtest 'RoomAggregate — cannot reserve already-reserved room' => {
     }, X::AdHoc, message => /:s not available/, 'cannot reserve already-reserved room';
 }
 
-subtest 'BookingSaga — out-of-order event rolls the saga back instead of crashing' => {
+subtest 'BookingSaga — an event with no candidate for the current state is a no-op' => {
     reset();
 
     my $room = sourcing RoomAggregate, :room-id<r40>;
@@ -195,21 +195,49 @@ subtest 'BookingSaga — out-of-order event rolls the saga back instead of crash
         :price-per-night(100.0.Rat),
     );
 
-    # GuestArrived is guarded by is on-state('confirmed'); the saga is still
-    # 'awaiting-payment'. The guard treats this protocol violation as a failure:
-    # it does not check the guest in — it rolls back and fails the saga.
+    # GuestArrived only has a candidate for state 'confirmed'; the saga is still
+    # 'awaiting-payment', so no candidate is selected and the event is dropped —
+    # the guest is not checked in and nothing is rolled back.
     my $saga = dispatch 'saga4', GuestArrived.new(:saga-id<saga4>, :room-id<r40>, :booking-id<bk4>);
-    is $saga.state, 'failed', 'unexpected event drives the saga to failed';
+    is $saga.state, 'awaiting-payment', 'unexpected event left the state unchanged';
+    is (sourcing RoomAggregate, :room-id<r40>).status, 'reserved',
+        'room stays reserved (no check-in, no rollback)';
+    is (sourcing BookingAggregate, :booking-id<bk4>).status, 'pending',
+        'booking untouched by the ignored event';
+    is (sourcing BookingSaga, :saga-id<saga4>).state, 'awaiting-payment',
+        'state stays awaiting-payment on replay';
+}
 
-    # rollback emitted the queued anti-events: room released, booking cancelled.
-    is (sourcing RoomAggregate, :room-id<r40>).status, 'available',
-        'room released by the guard-triggered rollback';
-    is (sourcing BookingAggregate, :booking-id<bk4>).status, 'cancelled',
-        'booking cancelled by the guard-triggered rollback';
+subtest 'BookingSaga — per-state dispatch: a duplicate payment hits the no-op candidate' => {
+    reset();
 
-    # The failure is durable: reconstruction replays to the same failed state.
-    is (sourcing BookingSaga, :saga-id<saga4>).state, 'failed',
-        'failed state is durable on replay';
+    my $room = sourcing RoomAggregate, :room-id<r50>;
+    $room.create: :room-type<suite>, :floor(6), :price-per-night(300.0.Rat);
+
+    dispatch 'saga5', BookingRequested.new(
+        :saga-id<saga5>,
+        :room-id<r50>,
+        :booking-id<bk5>,
+        :guest-name<Grace>,
+        :check-in<2026-12-01>,
+        :check-out<2026-12-03>,
+        :price-per-night(300.0.Rat),
+    );
+
+    my $saga = dispatch 'saga5', PaymentReceived.new(:saga-id<saga5>, :booking-id<bk5>);
+    is $saga.state, 'confirmed', 'first payment confirms the booking';
+
+    # A duplicate/late payment now matches apply(PaymentReceived) is
+    # on-state('confirmed') — a deliberate no-op. The booking stays confirmed and
+    # nothing is rolled back.
+    $saga = dispatch 'saga5', PaymentReceived.new(:saga-id<saga5>, :booking-id<bk5>);
+    is $saga.state, 'confirmed', 'duplicate payment is a no-op, still confirmed';
+    is (sourcing BookingAggregate, :booking-id<bk5>).status, 'confirmed',
+        'booking remains confirmed after the duplicate payment';
+
+    # The guest can still arrive afterwards: the flow was not disturbed.
+    $saga = dispatch 'saga5', GuestArrived.new(:saga-id<saga5>, :room-id<r50>, :booking-id<bk5>);
+    is $saga.state, 'occupied', 'flow continues normally after the duplicate';
 }
 
 done-testing;

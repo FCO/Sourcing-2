@@ -32,6 +32,7 @@ method apply(MyEvent $e) { ... }
 use Sourcing::Projection;
 use Sourcing::ProjectionId;
 use Sourcing::ProjectionIdMap;
+use Sourcing::OnState;
 use Sourcing::Saga;
 use Sourcing::X::OptimisticLocked;
 
@@ -190,30 +191,18 @@ multi trait_mod:<is>(Method $r, Str :$projection-id) is export {
 
 =head3 trait_mod:<is>(Method $m, :$on-state)
 
-Marks a method as being guarded by a specific state. The method only runs when
-the saga is in one of the given states. An event (or command) that arrives in
-the wrong state is a saga-protocol violation, so the guard does not run the body
-and instead drives the saga down its standard failure path — exactly what an
-uncaught exception in a saga method already does: it calls C<rollback()> (which
-emits the queued anti-events) and transitions the saga to the C<'failed'> state.
-The body is skipped, so no forward action is taken. On a non-saga method (one
-without C<rollback>) the guard falls back to throwing, as before.
+Tags an C<apply> candidate with the state — or list of states — in which it is
+allowed to run. This is a B<dispatch> key, not a guard wrapper: a saga may
+declare several C<apply> candidates for the same event type, each with a
+different C<on-state>, and the saga metaclass selects the one whose tag matches
+the saga's current state (see L<Metamodel::SagaHOW>). A candidate without an
+C<on-state> tag is a wildcard that runs in any state. When no candidate matches
+the current state the event is a no-op, so duplicate or late events are simply
+dropped; intentional compensation is modeled explicitly (an event whose handler
+calls C<rollback>), not as a side effect of an unexpected event.
 
 =end pod
 
-multi trait_mod:<is>(Method $m, :$on-state) is export {
-	$m.wrap: method (|c) {
-		if $on-state ~~ $.state {
-			nextsame
-		} elsif self.^can('rollback') {
-			# Out-of-state event: compensate and fail instead of crashing, the
-			# same way SagaHOW handles an uncaught exception in a saga method.
-			self.rollback;
-			my $state-attr = self.^attributes.first: *.name eq '$!state';
-			$state-attr.set_value(self, 'failed') if $state-attr;
-			Nil
-		} else {
-			die "Method { $m.name } can only be called in states: {$on-state.raku}. Current state: $.state"
-		}
-	}
+multi trait_mod:<is>(Method $m, :$on-state!) is export {
+	$m does Sourcing::OnState($on-state);
 }

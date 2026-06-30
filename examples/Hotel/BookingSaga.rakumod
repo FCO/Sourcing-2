@@ -10,8 +10,11 @@ use Hotel::BookingAggregate;
 # its own — only its state machine.
 #
 # The state machine is real, not decorative: every apply returns the next state
-# (SagaHOW sets `$.state` from it) and is guarded with `is on-state(...)`, so an
-# event arriving in the wrong state is rejected instead of corrupting the flow.
+# (SagaHOW sets `$.state` from it) and is tagged with `is on-state(...)`, which is
+# a dispatch key. Several apply candidates may handle the same event in different
+# states, and the saga picks the one matching the current state. An event that
+# matches no candidate for the current state is a no-op — duplicate or late events
+# are simply dropped (see the on-state('confirmed') PaymentReceived below).
 #
 #   pending          --BookingRequested--> awaiting-payment   (reserve room + open booking)
 #   awaiting-payment --PaymentReceived---> confirmed          (confirm booking)
@@ -49,6 +52,11 @@ saga BookingSaga {
         sourcing(BookingAggregate, :$booking-id).confirm;
         'confirmed'
     }
+
+    # A second candidate for the SAME event in a later state: a duplicate or late
+    # payment after the booking is already confirmed is a deliberate no-op. The
+    # state-aware dispatch picks this over rolling anything back.
+    multi method apply(PaymentReceived $) is on-state('confirmed') { }
 
     # Guest arrives: mark the room occupied.
     multi method apply(GuestArrived (:$room-id, :$booking-id, |)) is on-state('confirmed') {
