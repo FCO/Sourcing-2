@@ -18,11 +18,6 @@ that creates and emits the corresponding event.
 
 unit class Metamodel::AggregationHOW is Metamodel::ProjectionHOW;
 
-# Reverse index: event class name => the aggregation type that handles it.
-# Populated at compose time and used to discover the target stream for an
-# anti-event, the same way an event's id/owner is discovered elsewhere.
-my %aggregation-for-event;
-
 =begin pod
 
 =head1 METHODS
@@ -45,8 +40,6 @@ method compose(Mu $aggregation, |) {
 	$aggregation.^add_role: Sourcing::Aggregation;
 	callsame;
 	for $aggregation.^handled-events-map.kv -> Mu:U $event, %map {
-		%aggregation-for-event{$event.^name} = $aggregation;
-
 		my $method-name = lc S:g/(\w)<?before <[A..Z]>>/$0-/ given $event.^name;
 		$method-name .= subst: /'::'/, "-", :g;
 		$aggregation.^add_method: $method-name, my method (\SELF: |c) {
@@ -69,22 +62,15 @@ method compose(Mu $aggregation, |) {
 				$curr-version-attr.set_value: SELF, $current-version + 1;
 			}
 
+			# Opt-in capture of built events for saga anti-event compensation.
+			# Inert unless an enclosing scope has declared @*SourcingEvents
+			# (e.g. SagaHOW's apply wrapper while building an anti-event). We
+			# record the event together with the data needed to re-emit it.
+			with @*SourcingEvents {
+				.push: %( :event($new-event), :type(SELF.WHAT), :ids(%ids) );
+			}
+
 			return $new-event
 		}
 	}
-}
-
-=begin pod
-
-=head2 method aggregation-for-event
-
-Returns the aggregation type that handles events of the given type (the owner of
-that event's stream), or C<Nil> if none is known. Used to discover the target
-stream and ids for an anti-event from the event alone.
-
-=end pod
-
-method aggregation-for-event($, Mu:U $event-type) {
-	my $name = $event-type.^name;
-	%aggregation-for-event{$name}:exists ?? %aggregation-for-event{$name} !! Nil
 }

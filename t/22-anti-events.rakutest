@@ -2,22 +2,26 @@ use Test;
 use Sourcing;
 use Sourcing::Plugin::Memory;
 
-# Exercises declarative anti-events: a saga declares `anti-event(EventType)`
-# returning the inverse of what it does when it applies that event, and the
-# framework automatically queues the inverse on every apply and emits the queued
-# inverses in reverse order on rollback. No manual `self.undo` is used anywhere.
+# Exercises declarative anti-events: a saga declares `anti-event(EventType)` that
+# builds the inverse of what it does when it applies that event — by sourcing the
+# aggregate and calling its emit method, exactly as the forward reaction does.
+# The framework queues every built inverse and emits them in reverse order on
+# rollback. No manual `self.undo` anywhere.
 #
 # The saga is driven the idiomatic, event-driven way: `sourcing` rebuilds the
 # saga from its stream, then the new event is applied live. Because anti-event
 # capture happens inside `apply`, the compensation queue is rebuilt on every
 # reconstruction, so it survives reload with no extra persistence.
 
-# Domain events (owned by the Inventory aggregate stream).
-class StockReserved     { has Str $.item; has Int $.amount }
-class StockReleased     { has Str $.item; has Int $.amount }
+# Domain events (owned by the Inventory aggregate stream). The id is `is
+# required` on purpose: the emit method fills it from the aggregate, so the
+# anti-event handler never has to supply it.
+class StockReserved     { has Str $.item is required; has Int $.amount }
+class StockReleased     { has Str $.item is required; has Int $.amount }
 # Saga trigger events (the saga's own stream, keyed by saga-id).
-class StepRequested     { has Str $.saga-id; has Str $.item; has Int $.amount }
-class RollbackRequested { has Str $.saga-id }
+class StepRequested       { has Str $.saga-id; has Str $.item; has Int $.amount }
+class DoubleStepRequested { has Str $.saga-id; has Int $.amount }
+class RollbackRequested   { has Str $.saga-id }
 
 aggregation Inventory {
     has Str $.item is projection-id;
@@ -38,15 +42,28 @@ saga ReservationSaga {
         sourcing(Inventory, :item($e.item)).reserve: :amount($e.amount);
     }
 
+    # A step that reserves on two aggregates at once.
+    multi method apply(DoubleStepRequested $e) {
+        sourcing(Inventory, :item<WIDGET>).reserve: :amount($e.amount);
+        sourcing(Inventory, :item<GADGET>).reserve: :amount($e.amount);
+    }
+
     # A failure event drives rollback — purely event-driven, no direct calls.
     multi method apply(RollbackRequested $e) { self.rollback }
 
-    # The declarative inverse: just return the event that undoes the step.
-    # The framework discovers its owning aggregate (Inventory) and ids from the
-    # event itself, queues it automatically, and emits it on rollback. No manual
-    # self.undo, no aggregate plumbing.
+    # The declarative inverse: source the aggregate and build the undoing event
+    # via its emit method (stock-released), which fills the required `item`, so
+    # we only pass the amount. (We call the emit method, not the `release`
+    # command, because capture runs under replay where commands are suppressed.)
+    # No manual self.undo; the framework queues this automatically.
     multi method anti-event(StepRequested $e) {
-        StockReleased.new: :item($e.item), :amount($e.amount);
+        sourcing(Inventory, :item($e.item)).stock-released: :amount($e.amount);
+    }
+
+    # An anti-event may undo with more than one event — each emit is queued.
+    multi method anti-event(DoubleStepRequested $e) {
+        sourcing(Inventory, :item<WIDGET>).stock-released: :amount($e.amount);
+        sourcing(Inventory, :item<GADGET>).stock-released: :amount($e.amount);
     }
 }
 
@@ -61,13 +78,13 @@ sub dispatch(Str $saga-id, $event) {
     $*SourcingConfig.emit: $event;
 }
 
-sub released-amounts() {
+sub released-amounts(Str $item) {
     my %map{Mu:U};
     %map{StockReleased} = { item => 'item' };
-    $*SourcingConfig.get-events({ item => 'WIDGET' }, %map).map(*.amount);
+    $*SourcingConfig.get-events({ item => $item }, %map).map(*.amount);
 }
 
-plan 3;
+plan 4;
 
 subtest 'forward reactions reserve stock (no compensation yet)' => {
     Sourcing::Plugin::Memory.use;
@@ -76,7 +93,7 @@ subtest 'forward reactions reserve stock (no compensation yet)' => {
     dispatch 'S1', StepRequested.new(:saga-id<S1>, :item<WIDGET>, :amount(3));
 
     is (sourcing Inv, :item<WIDGET>).reserved, 5, 'both steps reserved stock (2 + 3)';
-    is released-amounts().elems, 0, 'nothing compensated before rollback';
+    is released-amounts('WIDGET').elems, 0, 'nothing compensated before rollback';
 };
 
 subtest 'event-triggered rollback auto-emits the inverses in reverse order' => {
@@ -91,8 +108,20 @@ subtest 'event-triggered rollback auto-emits the inverses in reverse order' => {
     dispatch 'S1', RollbackRequested.new(:saga-id<S1>);
 
     is (sourcing Inv, :item<WIDGET>).reserved, 0, 'all reserved stock released by rollback';
-    is released-amounts().join(','), '3,2',
+    is released-amounts('WIDGET').join(','), '3,2',
         'inverses emitted in reverse order (last reserved is released first)';
+};
+
+subtest 'an anti-event can undo with multiple events' => {
+    Sourcing::Plugin::Memory.use;
+
+    dispatch 'S2', DoubleStepRequested.new(:saga-id<S2>, :amount(4));
+    is (sourcing Inv, :item<WIDGET>).reserved, 4, 'widget reserved';
+    is (sourcing Inv, :item<GADGET>).reserved, 4, 'gadget reserved';
+
+    dispatch 'S2', RollbackRequested.new(:saga-id<S2>);
+    is (sourcing Inv, :item<WIDGET>).reserved, 0, 'widget released by multi-event rollback';
+    is (sourcing Inv, :item<GADGET>).reserved, 0, 'gadget released by multi-event rollback';
 };
 
 subtest 'replaying the rollback does not double-compensate' => {
