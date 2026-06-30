@@ -53,9 +53,11 @@ saga ReservationSaga {
 
     # The declarative inverse: source the aggregate and build the undoing event
     # via its emit method (stock-released), which fills the required `item`, so
-    # we only pass the amount. (We call the emit method, not the `release`
-    # command, because capture runs under replay where commands are suppressed.)
-    # No manual self.undo; the framework queues this automatically.
+    # we only pass the amount. We use the emit method, not the `release` command,
+    # on purpose: a compensation undoes a fact that already happened, so it must
+    # emit the inverse directly and bypass command validation (the command's
+    # guards protect forward operations, not rollback). No manual self.undo; the
+    # framework queues this automatically.
     multi method anti-event(StepRequested $e) {
         sourcing(Inventory, :item($e.item)).stock-released: :amount($e.amount);
     }
