@@ -20,6 +20,16 @@ plan 6;
 
 sub reset() { Sourcing::Plugin::Memory.use }
 
+# Event-driven dispatch: rebuild the saga from history, apply the new event live,
+# then persist it so later reconstructions replay it (and rebuild the anti-event
+# compensation queue). Returns the saga so callers can read its state.
+sub dispatch(Str $saga-id, $event) {
+    my $s = sourcing Sourcing::Example::Ecommerce::OrderFulfillmentSaga, :$saga-id;
+    $s.apply($event);
+    $*SourcingConfig.emit: $event;
+    $s
+}
+
 # Short aliases for the long namespaced types.
 constant Order     = Sourcing::Example::Ecommerce::OrderAggregate;
 constant Inventory = Sourcing::Example::Ecommerce::InventoryAggregate;
@@ -94,7 +104,7 @@ subtest 'OrderProjection — read model tracks order status' => {
     is $view.customer-id, 'C5', 'projection captured customer';
 };
 
-subtest 'OrderFulfillmentSaga — happy path completes the order' => {
+subtest 'OrderFulfillmentSaga — happy path fulfils the order' => {
     reset();
 
     # Stock + submitted order are preconditions for fulfillment.
@@ -107,55 +117,52 @@ subtest 'OrderFulfillmentSaga — happy path completes the order' => {
         :items({ WIDGET => { :quantity(2), :unit-price(9.99) } });
     $order.submit;
 
-    my $saga = sourcing Saga, :saga-id<S1>;
-    $saga.start-fulfillment:
-        :order-id<O1>,
-        :customer-id<C1>,
-        :items({ WIDGET => { :quantity(2) } }),
-        :total(19.98);
-
-    is $saga.status, 'completed', 'saga reaches completed';
-    ok $saga.payment-captured, 'payment captured flag set';
-
-    is (sourcing Order, :order-id<O1>).status, 'completed', 'order is completed';
+    # Drive the saga by events: reserve + pay, then confirm to complete the order.
+    my $saga = dispatch 'S1', FulfillmentRequested.new(
+        :saga-id<S1>, :order-id<O1>, :item-id<WIDGET>, :quantity(2), :amount(19.98));
+    is $saga.state, 'fulfilled', 'saga reaches fulfilled';
+    is (sourcing Order, :order-id<O1>).status, 'submitted', 'order stays submitted (reversible)';
 
     my $inv-after = sourcing Inventory, :item-id<WIDGET>;
     is $inv-after.reserved, 2, 'stock remains reserved for fulfilled order';
     is $inv-after.total-available, 8, 'available stock reduced';
 
-    is (sourcing Payment, :payment-id($saga.payment-id)).status, 'captured',
+    is (sourcing Payment, :payment-id<pay-O1>).status, 'captured',
         'payment ends captured';
+
+    $saga = dispatch 'S1', FulfillmentConfirmed.new(:saga-id<S1>, :order-id<O1>);
+    is $saga.state, 'completed', 'saga completes on confirmation';
+    is (sourcing Order, :order-id<O1>).status, 'completed', 'order is completed';
 };
 
-subtest 'OrderFulfillmentSaga — insufficient stock rolls back' => {
+subtest 'OrderFulfillmentSaga — cancellation rolls back via anti-events' => {
     reset();
 
-    # Only 1 in stock, but the order needs 5.
     my $inv = sourcing Inventory, :item-id<GADGET>;
-    $inv.adjust: :quantity-change(1), :reason<low-stock>;
+    $inv.adjust: :quantity-change(5), :reason<initial-stock>;
 
     my $order = sourcing Order, :order-id<O2>;
     $order.create-order:
         :customer-id<C2>,
-        :items({ GADGET => { :quantity(5), :unit-price(5.0) } });
+        :items({ GADGET => { :quantity(3), :unit-price(5.0) } });
     $order.submit;
 
-    my $saga = sourcing Saga, :saga-id<S2>;
-    dies-ok {
-        $saga.start-fulfillment:
-            :order-id<O2>,
-            :customer-id<C2>,
-            :items({ GADGET => { :quantity(5) } }),
-            :total(25.0);
-    }, 'fulfillment throws when inventory is insufficient';
+    # Fulfil, then cancel — the queued anti-events reverse every step.
+    dispatch 'S2', FulfillmentRequested.new(
+        :saga-id<S2>, :order-id<O2>, :item-id<GADGET>, :quantity(3), :amount(15.0));
+    is (sourcing Inventory, :item-id<GADGET>).reserved, 3, 'stock reserved before cancel';
 
-    is $saga.status, 'rolled-back', 'saga rolled back after failure';
+    my $saga = dispatch 'S2', FulfillmentCancelled.new(:saga-id<S2>);
+    is $saga.state, 'cancelled', 'saga is cancelled';
 
-    is (sourcing Order, :order-id<O2>).status, 'cancelled', 'order was cancelled by rollback';
+    is (sourcing Order, :order-id<O2>).status, 'cancelled', 'order cancelled by rollback';
 
     my $inv-after = sourcing Inventory, :item-id<GADGET>;
     is $inv-after.reserved, 0, 'no stock left reserved after rollback';
-    is $inv-after.total-available, 1, 'stock fully restored after rollback';
+    is $inv-after.total-available, 5, 'stock fully restored after rollback';
+
+    is (sourcing Payment, :payment-id<pay-O2>).status, 'refunded',
+        'payment refunded by rollback';
 };
 
 done-testing;

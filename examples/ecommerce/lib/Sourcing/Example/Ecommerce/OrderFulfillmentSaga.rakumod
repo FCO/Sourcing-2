@@ -11,231 +11,117 @@ use Sourcing::Example::Ecommerce::PaymentAggregate;
 
 =head1 NAME
 
-Sourcing::Example::Ecommerce::OrderFulfillmentSaga - Saga for order fulfillment
+Sourcing::Example::Ecommerce::OrderFulfillmentSaga - Event-driven order fulfillment saga
 
 =head1 DESCRIPTION
 
-A saga that orchestrates the multi-step process of fulfilling an order:
-1. Receives submitted order
-2. Reserves inventory for each item
-3. Initiates and authorizes payment
-4. Completes the order or rolls back on failure
+Fulfils a submitted order across three aggregates: it reserves inventory, takes
+payment, and completes the order. The saga is event-driven — it reacts to a
+C<FulfillmentRequested> event, sourcing each aggregate and issuing its commands —
+and its compensation is B<declarative>: a single C<anti-event(FulfillmentRequested)>
+builds the inverse of the whole fulfilment (release stock, refund payment, cancel
+the order). The framework queues those inverses and, on rollback, emits them in
+reverse order — no manual bookkeeping.
 
-This saga demonstrates:
-- State machine transitions
-- Compensation for rollback
-- Timeout handling
-- Sending commands to multiple aggregates
+The fulfilment (reserve + pay) is reversible; the order is left C<'submitted'> so
+it can still be cancelled. Completing the order is a separate, final step
+(C<FulfillmentConfirmed>) with no inverse. Rollback is driven by an event too: a
+C<FulfillmentCancelled> event (e.g. from a cancellation request or a timeout)
+transitions the saga and rolls it back.
+
+    pending   --FulfillmentRequested--> fulfilled   (reserve + pay)
+    fulfilled --FulfillmentConfirmed--> completed   (complete the order; final)
+    fulfilled --FulfillmentCancelled--> cancelled   (rollback: release + refund + cancel)
+
+The payment aggregate is addressed by a deterministic id derived from the order
+(C<pay-$order-id>), so both the forward flow and the anti-event can reach it
+without extra state on the saga.
 
 =end pod
 
 unit saga Sourcing::Example::Ecommerce::OrderFulfillmentSaga;
 
 has Str $.saga-id is projection-id;
-has Str $.order-id;
-has Str $.status = 'started';
-has Str $.customer-id;
-has %.items;
-has Rat $.total = 0.0;
-has Str $.payment-id;
-has Bool $.inventory-reserved = False;
-has Bool $.payment-authorized = False;
-has Bool $.payment-captured = False;
-has Str $.failure-reason;
+has Str $.state = 'pending';
+
+sub payment-id-for(Str $order-id --> Str) { "pay-$order-id" }
 
 =begin pod
 
-=head2 Method apply
+=head2 method apply(FulfillmentRequested)
 
-This saga is driven synchronously by command methods (start-fulfillment and
-the timeout handler), so its own event stream only ever contains the saga
-infrastructure events. Progress flags and status are updated directly by the
-command methods below rather than reconstructed from domain events.
-
-Note we deliberately do NOT declare apply handlers for the domain events
-(InventoryReserved, PaymentAuthorized, ...): those belong to the aggregates'
-streams, not the saga's, and declaring them here would make AggregationHOW
-generate emit methods whose kebab names collide with the boolean progress
-accessors (e.g. payment-authorized).
+Reserves stock and takes payment (initiate → authorize → capture). Runs only from
+the C<'pending'> state. The order is left C<'submitted'> so the fulfilment stays
+reversible.
 
 =end pod
 
-multi method apply(Sourcing::Saga::Events::SagaCreated $e) {
-    # Initial state - saga created
-}
+multi method apply(
+    FulfillmentRequested (:$order-id, :$item-id, :$quantity, :$amount, |)
+) is on-state('pending') {
+    sourcing(Sourcing::Example::Ecommerce::InventoryAggregate, :$item-id)
+        .reserve: :$order-id, :$quantity;
 
-multi method apply(Sourcing::Saga::Events::SagaAggregationBound $e) {
-    # Aggregation binding events handled automatically by metaclass
+    my $payment-id = payment-id-for $order-id;
+    sourcing(Sourcing::Example::Ecommerce::PaymentAggregate, :$payment-id)
+        .initiate: :$order-id, :$amount, :method<credit-card>;
+    sourcing(Sourcing::Example::Ecommerce::PaymentAggregate, :$payment-id)
+        .authorize: :authorization-code("AUTH-$order-id");
+    sourcing(Sourcing::Example::Ecommerce::PaymentAggregate, :$payment-id)
+        .capture: :captured-amount($amount);
+
+    'fulfilled'
 }
 
 =begin pod
 
-=head2 Method start-fulfillment
+=head2 method apply(FulfillmentConfirmed)
 
-Starts the fulfillment process for a submitted order.
-This is called when an order is submitted.
+Completes the order — the final, irreversible step. It has no C<anti-event>.
 
 =end pod
 
-method start-fulfillment(Str :$order-id, Str :$customer-id, :%items, Rat :$total) {
-    $!order-id = $order-id;
-    $!customer-id = $customer-id;
-    %!items = %items;
-    $!total = $total;
-    $!status = 'processing';
-
-    # Start the process by reserving inventory
-    self.reserve-inventory;
+multi method apply(FulfillmentConfirmed (:$order-id, |)) is on-state('fulfilled') {
+    sourcing(Sourcing::Example::Ecommerce::OrderAggregate, :$order-id).complete;
+    'completed'
 }
 
 =begin pod
 
-=head2 Method reserve-inventory
+=head2 method apply(FulfillmentCancelled)
 
-Step 1: Reserve inventory for all items in the order.
-
-=end pod
-
-method reserve-inventory() {
-    # Reserve stock for each item. If any reservation throws (e.g. insufficient
-    # stock), SagaHOW's exception wrapper calls rollback() — which releases the
-    # stock reserved so far — and re-throws, so no manual compensation
-    # bookkeeping is needed here.
-    for %.items.kv -> $item-id, $item-data {
-        my $inventory = sourcing Sourcing::Example::Ecommerce::InventoryAggregate, :$item-id;
-        $inventory.reserve: :order-id($!order-id), :quantity($item-data<quantity>);
-        $!inventory-reserved = True;
-    }
-
-    # Schedule timeout in case payment doesn't complete
-    self.timeout-in: 'payment-timeout', :seconds(300);  # 5 minutes
-
-    # Proceed to payment
-    self.initiate-payment;
-}
-
-=begin pod
-
-=head2 Method initiate-payment
-
-Step 2: Initiate payment for the order.
+Cancels a fulfilled order: C<rollback> emits the queued anti-events (release
+stock, refund payment, cancel the order) in reverse order.
 
 =end pod
 
-method initiate-payment() {
-    $!payment-id = "pay-" ~ $!order-id ~ "-" ~ DateTime.now.posix;
-
-    # Create the payment aggregate and initiate it
-    my $payment = sourcing Sourcing::Example::Ecommerce::PaymentAggregate, :payment-id($!payment-id);
-    $payment.initiate: :order-id($!order-id), :amount($!total), :method<credit-card>;
-
-    # Proceed to authorization
-    self.authorize-payment;
-}
-
-=begin pod
-
-=head2 Method authorize-payment
-
-Step 3: Authorize the payment.
-
-=end pod
-
-method authorize-payment() {
-    my $payment = sourcing Sourcing::Example::Ecommerce::PaymentAggregate, :payment-id($!payment-id);
-    $payment.authorize: :authorization-code("AUTH-" ~ $!payment-id);
-    $!payment-authorized = True;
-    
-    # Proceed to capture
-    self.capture-payment;
-}
-
-=begin pod
-
-=head2 Method capture-payment
-
-Step 4: Capture the payment.
-
-=end pod
-
-method capture-payment() {
-    my $payment = sourcing Sourcing::Example::Ecommerce::PaymentAggregate, :payment-id($!payment-id);
-    $payment.capture: :captured-amount($!total);
-    $!payment-captured = True;
-    
-    # Cancel the timeout since we succeeded
-    self.cancel-timeout: 'payment-timeout';
-    
-    # Complete the order
-    self.complete-order;
-}
-
-=begin pod
-
-=head2 Method complete-order
-
-Step 5: Mark the order as completed.
-
-=end pod
-
-method complete-order() {
-    my $order = sourcing Sourcing::Example::Ecommerce::OrderAggregate, :order-id($!order-id);
-    $order.complete;
-    $!status = 'completed';
-}
-
-=begin pod
-
-=head2 Method payment-timeout
-
-Timeout handler - if payment doesn't complete in time, fail the order.
-
-=end pod
-
-method payment-timeout() {
-    $!failure-reason = "Payment timeout - order failed to complete within allotted time";
-    $!status = 'failed';
+multi method apply(FulfillmentCancelled $) is on-state('fulfilled') {
     self.rollback;
+    'cancelled'
 }
 
 =begin pod
 
-=head2 Method rollback
+=head2 method anti-event(FulfillmentRequested)
 
-Compensates for any completed steps when the saga fails.
+The declarative inverse of a fulfilment. Sources each aggregate and calls its
+emit method (not its command) — a compensation undoes a fact that already
+happened, so it emits the inverse directly and bypasses forward validation. The
+aggregates' projection-ids (item-id, payment-id, order-id) are filled by the emit
+methods, so only the extra fields are passed.
 
 =end pod
 
-method rollback() {
-    # SagaHOW wraps every saga method so that an uncaught exception triggers
-    # rollback() and re-throws. As the exception unwinds through each nested
-    # saga call, every level's wrapper invokes rollback() again on this same
-    # instance, so rollback must be idempotent: mark ourselves rolled-back up
-    # front and bail out on re-entry, and only compensate the steps whose flags
-    # are still set (clearing each as we go).
-    return if $!status eq 'rolled-back';
-    $!status = 'rolled-back';
+multi method anti-event(
+    FulfillmentRequested (:$order-id, :$item-id, :$quantity, :$amount, |)
+) {
+    sourcing(Sourcing::Example::Ecommerce::InventoryAggregate, :$item-id)
+        .inventory-released: :$order-id, :$quantity, :released-at(DateTime.now);
 
-    # Release inventory if it was reserved
-    if $!inventory-reserved {
-        for %.items.kv -> $item-id, $item-data {
-            my $inventory = sourcing Sourcing::Example::Ecommerce::InventoryAggregate, :$item-id;
-            $inventory.release: :order-id($!order-id);
-        }
-        $!inventory-reserved = False;
-    }
+    sourcing(Sourcing::Example::Ecommerce::PaymentAggregate, :payment-id(payment-id-for $order-id))
+        .payment-refunded: :refunded-amount($amount), :reason('Order fulfillment cancelled'),
+            :refunded-at(DateTime.now);
 
-    # Refund the payment if it was captured
-    if $!payment-captured {
-        my $payment = sourcing Sourcing::Example::Ecommerce::PaymentAggregate, :payment-id($!payment-id);
-        $payment.refund: :refunded-amount($!total), :reason("Order fulfillment failed");
-        $!payment-captured = False;
-    }
-
-    # Cancel the order if it is still in a cancellable state
-    if $!order-id {
-        my $order = sourcing Sourcing::Example::Ecommerce::OrderAggregate, :order-id($!order-id);
-        $order.cancel: :reason($!failure-reason // "Unknown failure")
-            if $order.status eq 'pending' | 'submitted';
-    }
+    sourcing(Sourcing::Example::Ecommerce::OrderAggregate, :$order-id)
+        .order-cancelled: :reason('Order fulfillment cancelled'), :cancelled-at(DateTime.now);
 }

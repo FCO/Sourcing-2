@@ -107,3 +107,20 @@ class PaymentRefunded is export {
     has Str $.reason;
     has DateTime $.refunded-at;
 }
+# Saga trigger events (the OrderFulfillmentSaga's own stream, keyed by saga-id).
+class FulfillmentRequested is export {
+    has Str $.saga-id  is required;
+    has Str $.order-id  is required;
+    has Str $.item-id   is required;
+    has Int $.quantity  is required;
+    has Rat $.amount    is required;
+}
+
+class FulfillmentCancelled is export {
+    has Str $.saga-id is required;
+}
+
+class FulfillmentConfirmed is export {
+    has Str $.saga-id  is required;
+    has Str $.order-id is required;
+}
