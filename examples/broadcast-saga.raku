@@ -1,92 +1,53 @@
 #!/usr/bin/env raku
 use v6.e.PREVIEW;
-use lib '..';
 
 =begin pod
 
 =head1 NAME
 
-broadcast-saga.raku - Demonstration of IRC broadcast saga
+broadcast-saga.raku - Event-driven IRC broadcast saga with declarative rollback
 
 =head1 SYNOPSIS
 
-    raku examples/broadcast-saga.raku
+    raku -Ilib examples/broadcast-saga.raku
 
 =head1 DESCRIPTION
 
-Demonstrates the BroadcastSaga pattern for an IRC bot that broadcasts
-messages across multiple channels with automatic rollback on failure.
-
-This example defines everything inline for simplicity, matching the pattern
-used in the test suite.
+Broadcasts a message across several channels. The saga is event-driven: each
+channel send is its own C<ChannelTargeted> event, which the saga reacts to by
+sending the message and declaring its inverse with C<anti-event> (a retraction).
+The framework queues those inverses and, on rollback, emits them in reverse
+order — so aborting a broadcast retracts exactly the channels that received it,
+newest first, with no manual bookkeeping.
 
 =end pod
 
 use Sourcing;
 use Sourcing::Plugin::Memory;
-use Sourcing::Saga::Events;
 
-say "=== IRC Broadcast Saga Demo ===\n";
-
-# Initialize the event store
 Sourcing::Plugin::Memory.use;
 
 #=====================================================================
-# EVENT DEFINITIONS
+# EVENTS
 #=====================================================================
 
+# Channel-stream event (what a channel records).
 class ChannelMessageSent {
-    has Str $.saga-id;
     has Str $.channel;
     has Str $.message;
     has Str $.sender;
-    has DateTime $.sent-at;
 }
 
-class ChannelSendFailed {
+# Saga-stream trigger events (keyed by saga-id).
+class ChannelTargeted {
     has Str $.saga-id;
     has Str $.channel;
-    has Str $.reason;
-    has DateTime $.failed-at;
-}
-
-class UserMessageSent {
-    has Str $.saga-id;
+    has Str $.message;
     has Str $.user;
-    has Str $.channel;
-    has DateTime $.sent-at;
 }
 
-class BroadcastCompleted {
+class BroadcastAborted {
     has Str $.saga-id;
-    has Int $.channels-broadcast;
-    has DateTime $.completed-at;
-}
-
-class BroadcastFailed {
-    has Str $.saga-id;
-    has Str $.reason;
-    has Int $.successful-sends;
-    has Int $.failed-sends;
-    has DateTime $.failed-at;
-}
-
-class BroadcastRolledBack {
-    has Str $.saga-id;
-    has Int $.successful-sends;
-    has Str $.failed-channel;
-    has DateTime $.rolled-back-at;
-}
-
-class ChannelConnected {
-    has Str $.channel;
-    has DateTime $.connected-at = DateTime.now;
-}
-
-class ChannelDisconnected {
-    has Str $.channel;
-    has Str $.reason = '';
-    has DateTime $.disconnected-at = DateTime.now;
 }
 
 #=====================================================================
@@ -96,42 +57,13 @@ class ChannelDisconnected {
 aggregation ChannelAggregate {
     has Str $.channel is projection-id;
     has Int $.message-count = 0;
-    has Bool $.is-connected = True;
+    has Bool $.connected = True;
 
-    multi method apply(ChannelMessageSent $e) {
-        $!message-count++;
-    }
+    multi method apply(ChannelMessageSent $e) { $!message-count++ }
 
-    multi method apply(ChannelDisconnected $e) {
-        $!is-connected = False;
-    }
-
-    multi method apply(ChannelConnected $e) {
-        $!is-connected = True;
-    }
-
-    method start() {
-        self.channel-connected: :channel($!channel);
-    }
-
-    method send-message(Str :$message, Str :$sender) {
-        die "Cannot send to disconnected channel $!channel"
-            unless $!is-connected;
-
-        self.channel-message-sent:
-            :channel($!channel),
-            :$message,
-            :$sender,
-            :sent-at(DateTime.now);
-    }
-
-    method send-retraction(Str :$original-message, Str :$reason) {
-        my $retraction-msg = "[Retracted: $reason] Original: $original-message";
-        self.send-message: :message($retraction-msg), :sender("bot");
-    }
-
-    method disconnect(Str :$reason = '') {
-        self.channel-disconnected: :$!channel, :$reason;
+    method send-message(Str :$message, Str :$sender) is command {
+        die "Channel $!channel is disconnected" unless $!connected;
+        $.channel-message-sent: :$message, :$sender;
     }
 }
 
@@ -141,262 +73,72 @@ aggregation ChannelAggregate {
 
 saga BroadcastSaga {
     has Str $.saga-id is projection-id;
-    has Str $.original-channel;
-    has Str $.user;
-    has Str $.message;
-    has Str $.status = 'started';
-    has Int $.channels-sent = 0;
-    has Int $.channels-failed = 0;
-    has Int $.successful-sends = 0;
-    has Str $.failure-reason;
+    has Str $.state = 'idle';
 
-    # Track successful channels for rollback
-    has Str @.successful-channels;
-
-    # Connected channels (in real bot, this would come from bot state)
-    has @.connected-channels = <#general #random #announcements>;
-
-    # Event handlers
-    multi method apply(Sourcing::Saga::Events::SagaCreated $e) { }
-
-    multi method apply(BroadcastRolledBack $e) {
-        $!status = 'rolled-back';
+    # Send the message to one channel. Valid while idle or already broadcasting.
+    multi method apply(ChannelTargeted (:$channel, :$message, :$user, |))
+        is on-state(<idle broadcasting>)
+    {
+        sourcing(ChannelAggregate, :$channel).send-message: :$message, :sender($user);
+        'broadcasting'
     }
 
-    multi method apply(BroadcastCompleted $e) {
-        $!status = 'completed';
-        $!channels-sent = $e.channels-broadcast;
+    # Abort: rollback emits the queued retractions in reverse order.
+    multi method apply(BroadcastAborted $) is on-state('broadcasting') {
+        self.rollback;
+        'aborted'
     }
 
-    multi method apply(BroadcastFailed $e) {
-        $!status = 'failed';
-        $!failure-reason = $e.reason;
-    }
-
-    multi method apply(ChannelMessageSent $e) {
-        $!channels-sent++;
-        $!successful-sends++;
-        @!successful-channels.push: $e.channel unless $e.channel eq $!original-channel;
-    }
-
-    multi method apply(ChannelSendFailed $e) {
-        $!channels-failed++;
-        $!failure-reason = $e.reason;
-        $!status = 'failed';
-    }
-
-    multi method apply(UserMessageSent $e) { }
-
-    =begin pod
-
-    =head2 broadcast
-
-    Initialize and begin the broadcast saga.
-
-    =end pod
-
-    method broadcast(Str :$channel, Str :$user, Str :$message) is command {
-        $!original-channel = $channel;
-        $!user = $user;
-        $!message = $message;
-        $!status = 'broadcasting';
-        $!channels-sent = 0;
-        $!channels-failed = 0;
-        @!successful-channels = ();
-
-        # Start broadcasting to other channels
-        self.broadcast-to-channels;
-    }
-
-    =begin pod
-
-    =head2 broadcast-to-channels
-
-    Orchestrate sending to all channels.
-
-    =end pod
-
-    method broadcast-to-channels() {
-        my @channels = @.connected-channels.grep: * ne $!original-channel;
-
-        for @channels -> $ch {
-            self.send-to-channel: $ch;
-            return if $!status eq 'failed';
-        }
-
-        # Send confirmation to original user
-        self.send-user-confirmation;
-    }
-
-    =begin pod
-
-    =head2 send-to-channel
-
-    Send to a single channel. Register compensation for rollback.
-
-    =end pod
-
-    method send-to-channel(Str $channel) {
-        # No `try` here: a bare CATCH handles the whole method scope. When the
-        # send fails we record the failure and roll back, and the method then
-        # exits — which is exactly what we want, since there is no post-failure
-        # work left to do in this method. (`try` would only matter if we needed
-        # to keep running *after* the failed block.)
-        CATCH {
-            default {
-                my $e = $_;
-                $.channel-send-failed:
-                    :$channel,
-                    :reason($e.message),
-                    :failed-at(DateTime.now);
-                $!channels-failed++;
-                $!failure-reason = "Failed to send to $channel: {$e.message}";
-                $!status = 'failed';
-                self.rollback;
-            }
-        }
-
-        my $ch-agg = sourcing ChannelAggregate, :$channel;
-        $ch-agg.send-message: :message($!message), :sender($!user);
-
-        # Track success
-        @!successful-channels.push: $channel;
-        $!channels-sent++;
-
-        # Register compensation action
-        self.undo: -> {
-            my $retry-ch = sourcing ChannelAggregate, :$channel;
-            $retry-ch.send-retraction:
-                :original-message($!message),
-                :reason($!failure-reason // "Broadcast cancelled");
-        };
-    }
-
-    =begin pod
-
-    =head2 send-user-confirmation
-
-    Send confirmation back to the original user.
-
-    =end pod
-
-    method send-user-confirmation() {
-        my $original-ch = sourcing ChannelAggregate, :channel($!original-channel);
-
-        # `try` IS needed here: a failed confirmation should only be logged,
-        # and we must STILL emit BroadcastCompleted below. A bare CATCH would
-        # exit the whole method on failure and skip the completion event, so we
-        # scope the containment to the `try` block and let execution continue
-        # after it.
-        try {
-            CATCH {
-                default {
-                    note "Warning: Could not confirm to user $!user: {$_.message}";
-                }
-            }
-
-            my $confirmation = "Your message was broadcast to {$!channels-sent} channel(s)";
-            $original-ch.send-message: :message("$confirmation - {$!message}"), :sender("bot");
-
-            $.user-message-sent:
-                :user($!user),
-                :channel($!original-channel),
-                :sent-at(DateTime.now);
-        }
-
-        # Mark as completed
-        $.broadcast-completed:
-            :channels-broadcast($!channels-sent),
-            :completed-at(DateTime.now);
-    }
-
-    =begin pod
-
-    =head2 rollback
-
-    Compensate for successful sends by sending retractions.
-
-    =end pod
-
-    method rollback() {
-        callsame;  # Execute undo blocks (sends retractions)
-
-        $.broadcast-rolled-back:
-            :successful-sends($!successful-sends),
-            :failed-channel($!failure-reason),
-            :rolled-back-at(DateTime.now);
+    # The inverse of a channel send: post a retraction to the same channel. We use
+    # the emit method (not the send-message command) so the compensation bypasses
+    # the "is it connected?" guard — it undoes a fact that already happened.
+    multi method anti-event(ChannelTargeted (:$channel, :$message, |)) {
+        sourcing(ChannelAggregate, :$channel).channel-message-sent:
+            :message("[Retracted] $message"), :sender('bot');
     }
 }
 
 #=====================================================================
-# DEMO EXECUTION
+# DRIVER
 #=====================================================================
 
-say "Setting up connected channels...";
-for <#general #random #announcements> -> $channel {
-    my $ch = ChannelAggregate.new: :$channel;
-    $ch.start;
-    say "  - Connected to $channel";
+# Idiomatic dispatch: rebuild from history, apply live, then persist.
+sub dispatch(Str $saga-id, $event) {
+    my $s = sourcing BroadcastSaga, :$saga-id;
+    $s.apply: $event;
+    $*SourcingConfig.emit: $event;
+    $s
 }
-say "";
 
-# --- Demo 1: Successful Broadcast ---
-say "--- Demo 1: Successful Broadcast ---";
-say "Alice sends 'Hello everyone!' on #general\n";
-
-my $saga-id1 = "broadcast-{now.Int}";
-my $saga = sourcing BroadcastSaga, :saga-id($saga-id1);
-
-$saga.broadcast:
-    :channel('#general'),
-    :user('alice'),
-    :message('Hello everyone!');
-
-my $result = sourcing BroadcastSaga, :saga-id($saga-id1);
-say "Result: {$result.status}";
-say "Channels sent: {$result.channels-sent}";
-say "Failed sends: {$result.channels-failed}";
-say "";
-
-say "Channel message counts:";
-for <#general #random #announcements> -> $channel {
-    my $ch = sourcing ChannelAggregate, :$channel;
-    say "  - $channel: {$ch.message-count} messages";
+sub message-counts(@channels) {
+    @channels.map({ "$_: {(sourcing ChannelAggregate, :channel($_)).message-count}" }).join(', ')
 }
-say "";
 
-# --- Demo 2: Broadcast with Failure ---
-say "--- Demo 2: Broadcast with Failure & Rollback ---";
-say "Bob sends 'Important announcement!' on #random\n";
+say "=== IRC Broadcast Saga Demo ===\n";
 
-my $saga-id2 = "broadcast-{now.Int}-b";
-my $saga2 = sourcing BroadcastSaga, :saga-id($saga-id2);
+my @channels = <#general #random #announcements>;
 
-# Disconnect #announcements to simulate failure
-my $disc = sourcing ChannelAggregate, :channel('#announcements');
-$disc.disconnect: :reason("Network error");
-
-$saga2.broadcast:
-    :channel('#random'),
-    :user('bob'),
-    :message('Important announcement!');
-
-my $result2 = sourcing BroadcastSaga, :saga-id($saga-id2);
-say "Result: {$result2.status}";
-say "Channels sent: {$result2.channels-sent}";
-say "Failed sends: {$result2.channels-failed}";
-say "Failure reason: {$result2.failure-reason // 'N/A'}";
-say "";
-
-say "Channel message counts after rollback:";
-for <#general #random #announcements> -> $channel {
-    my $ch = sourcing ChannelAggregate, :$channel;
-    say "  - $channel: {$ch.message-count} messages";
+# --- Demo 1: a broadcast that goes through ---
+say "--- Demo 1: broadcast to every channel ---";
+my $s1 = 'bcast-1';
+for @channels -> $channel {
+    dispatch $s1, ChannelTargeted.new(:saga-id($s1), :$channel, :message('Hello everyone!'), :user<alice>);
 }
+say "state: ", (sourcing BroadcastSaga, :saga-id($s1)).state;
+say "counts: ", message-counts(@channels);
 say "";
 
-say "Note: Since #announcements was disconnected, the broadcast failed.";
-say "The saga rolled back by sending retractions to successful channels.";
+# --- Demo 2: a broadcast that is aborted and rolled back ---
+say "--- Demo 2: broadcast, then abort (retractions in reverse) ---";
+my $s2 = 'bcast-2';
+dispatch $s2, ChannelTargeted.new(:saga-id($s2), :channel('#general'),       :message('Ping'), :user<bob>);
+dispatch $s2, ChannelTargeted.new(:saga-id($s2), :channel('#random'),        :message('Ping'), :user<bob>);
+dispatch $s2, ChannelTargeted.new(:saga-id($s2), :channel('#announcements'), :message('Ping'), :user<bob>);
+say "after broadcast — counts: ", message-counts(@channels);
+
+my $aborted = dispatch $s2, BroadcastAborted.new(:saga-id($s2));
+say "state: ", $aborted.state;
+say "after abort   — counts: ", message-counts(@channels), " (each got a retraction)";
 say "";
 
 say "=== Demo Complete ===";
