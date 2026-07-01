@@ -81,5 +81,8 @@ Marks an attribute as a projection identifier. This attribute's value is used to
 
 ### trait_mod:<is>(Method $m, :$on-state)
 
-Tags a saga `apply` candidate with the state — or list of states — in which it may run. This is a *dispatch key*, not a guard wrapper: a saga may declare several `apply` candidates for the same event type, each with a different `on-state`, and the metaclass runs the one whose tag matches the saga's current state. A candidate without an `on-state` tag is a wildcard that runs in any state; tagged candidates take precedence and the most specific event type wins. If no candidate matches the event in the current state, the saga rolls back (emitting its queued anti-events) and moves to the `'failed'` state. Declare a no-op candidate with the matching `is on-state(...)` to accept (and ignore) an event in a state on purpose.
+Restricts a saga method to the given state(s). `$on-state` may be a single state (`'ready'`), a list (`<ready shipping>`), or a junction (`'a' | 'b'`, `none <completed failed>`). Its effect depends on the method it tags:
+
+- On an **`apply`** candidate it is a *dispatch key*: a saga may declare several `apply` candidates for the same event type, each with a different `on-state`, and the metaclass runs the one whose tag matches the current state. Untagged candidates are wildcards; tagged candidates and the most specific event type win. If no candidate matches, the saga rolls back and moves to `'failed'` — declare a no-op candidate to accept (and ignore) an event in a state on purpose.
+- On any **other** method (typically a `command`) it is a runtime *guard*: calling it while the saga is not in one of the allowed states throws.
 

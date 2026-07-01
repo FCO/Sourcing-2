@@ -33,6 +33,7 @@ method compose(Mu $saga, |) {
 	callsame;
 	self.wrap-methods-with-exception-handling($saga);
 	self.wrap-apply-with-state-dispatch($saga);
+	self.wrap-on-state-command-guards($saga);
 }
 
 =begin pod
@@ -178,7 +179,7 @@ method wrap-apply-with-state-dispatch(Mu $saga) {
 		# Select the candidate for this event type whose on-state matches the
 		# current state; fall back to the untagged (wildcard) candidates.
 		my @cands    = @candidates.grep: *.cando: \(self, $event);
-		my @stated   = @cands.grep: -> $c { $c.?on-state.defined && (self.state ~~ any($c.on-state.list)) };
+		my @stated   = @cands.grep: -> $c { $c.?on-state.defined && $c.matches(self.state) };
 		my @wildcard = @cands.grep: -> $c { !$c.?on-state.defined };
 		my @group    = @stated || @wildcard;     # state-specific candidates win over wildcards
 
@@ -225,4 +226,34 @@ method wrap-apply-with-state-dispatch(Mu $saga) {
 			if $state-attr && $result.defined && $result !~~ Exception;
 		$result
 	};
+}
+
+=begin pod
+
+=head2 method wrap-on-state-command-guards
+
+Installs the runtime guard for C<is on-state(...)> on B<non-C<apply>> methods
+(typically commands). Such a method may only run when the saga is in one of its
+tagged states; otherwise it throws. The guard is wrapped here, at compose time,
+so it sits B<outside> the C<is command> retry wrapper — an inner wrapper cannot
+re-dispatch through C<is command>'s C<nextcallee> mechanism, so a plain outer
+C<callsame> is the only thing that composes. C<apply> candidates are dispatched
+by state instead (see C<wrap-apply-with-state-dispatch>) and are skipped here.
+
+=end pod
+
+method wrap-on-state-command-guards(Mu $saga) {
+	my $key = $saga.^name ~ '-on-state-guard';
+	return if %wrapped-sagas{$key}:exists;
+	%wrapped-sagas{$key} = True;
+
+	for $saga.^methods.grep({ .name ne 'apply' && .?on-state.defined }) -> $method {
+		next if $method.?is_wrapper;
+		$method.wrap: my method (|c) {
+			die "Method { $method.name } can only be called in state(s) "
+				~ "{ $method.on-state.raku }; current state: { $.state }"
+				unless $method.matches: $.state;
+			callsame
+		}
+	}
 }

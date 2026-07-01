@@ -165,7 +165,7 @@ $.undo: *.account.reverse-withdraw: 100;
 
             <h2>State Machine and Per-State Dispatch</h2>
             <p>Each <code>apply</code> method returns its resulting state (via <code>--> 'state-name'</code> or by returning the string). The saga tracks the current state in <code>$.state</code>.</p>
-            <p>The <code>is on-state(...)</code> trait is a <strong>dispatch key</strong>: a saga may declare several <code>apply</code> candidates for the same event type, each tagged with a different state (or list of states), and the framework runs the one matching the current state. Untagged candidates are wildcards; tagged candidates and the most specific event type win. If no candidate matches the event in the current state, the saga rolls back and moves to <code>'failed'</code> — declare a no-op candidate to accept (and ignore) an event in a state on purpose.</p>
+            <p>On an <code>apply</code> candidate the <code>is on-state(...)</code> trait is a <strong>dispatch key</strong>: a saga may declare several <code>apply</code> candidates for the same event type, each tagged with a different state (a single state, a list, or a junction), and the framework runs the one matching the current state. Untagged candidates are wildcards; tagged candidates and the most specific event type win. If no candidate matches the event in the current state, the saga rolls back and moves to <code>'failed'</code> — declare a no-op candidate to accept (and ignore) an event in a state on purpose. On a non-<code>apply</code> method (typically a <code>command</code>), the same trait is a runtime <strong>guard</strong> that throws when the method is called in a disallowed state.</p>
 
             <h2>See Also</h2>
             <ul>

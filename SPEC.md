@@ -231,7 +231,7 @@ The aggregate is the gatekeeper. Every state change must pass through it. It ans
 1. **Stay event-driven.** `apply()` methods react to events: they source the aggregates the saga coordinates and issue commands, returning the next state. Commands called from `apply()` are skipped during replay via `$*SourcingReplay`.
 2. **Declare an `anti-event` per reaction.** For every event the saga reacts to, declare a `multi method anti-event(EventType $e)` that builds the inverse. The framework queues it automatically on each `apply`, so rollback is always possible without manual bookkeeping.
 3. **Use explicit state names.** The return type syntax `--> 'state-name'` (or simply returning the string) declares the new state. Keep state names descriptive and consistent.
-4. **Dispatch by state with `is on-state()`.** Tag `apply` candidates so the right one runs per state; declare a no-op candidate to accept (and ignore) an event in a state on purpose. Accepts a single state or a list (`<a b>`).
+4. **Dispatch by state with `is on-state()`.** Tag `apply` candidates so the right one runs per state; declare a no-op candidate to accept (and ignore) an event in a state on purpose. On a command (non-`apply`) method the same trait is a runtime guard that throws when called in the wrong state. Accepts a single state, a list (`<a b>`), or a junction (`'a' | 'b'`, `none <done failed>`).
 5. **Commands may be retried after crashes.** If a saga crashes mid-execution, unprocessed events are re-applied on restart, which may re-run commands. Target aggregations should handle idempotent commands.
 6. **Unhandled exception or unmatched event triggers compensation.** If any method throws an uncaught exception, or an event reaches the saga that no `apply` candidate handles in the current state, the saga rolls back (emitting its queued anti-events in reverse) and transitions to the `'failed'` state.
 
@@ -348,7 +348,7 @@ Ask these questions:
 | `is projection-id<>`       | Trait    | Shorthand for single ID mapping                        |
 | `is command`               | Trait    | Wraps method with reset, replay, validation, and auto-retry |
 | `is command(False)`        | Trait    | Marks a method as explicitly NOT a command. Prevents `AggregationHOW` from auto-generating an event-emitting method with the same name. |
-| `is on-state()`            | Trait    | Per-state dispatch key for saga `apply` candidates (single state or list) |
+| `is on-state()`            | Trait    | Per-state dispatch key for saga `apply` candidates; runtime state guard on command methods (single state, list, or junction) |
 
 **Public API**:
 
@@ -1302,7 +1302,7 @@ saga MySaga {
 
 ### The `is on-state()` Trait
 
-The `is on-state()` trait tags a saga `apply` candidate with the state — or list of states — in which it may run. It is a **dispatch key**, not a guard wrapper: a saga may declare several `apply` candidates for the same event type, each tagged with a different state, and the metaclass runs the one whose tag matches the saga's current state.
+The `is on-state()` trait restricts a saga method to the given state(s). Its effect depends on what it tags. On an **`apply`** candidate it is a **dispatch key**: a saga may declare several `apply` candidates for the same event type, each tagged with a different state, and the metaclass runs the one whose tag matches the saga's current state. On any **other** method (typically a `command`) it is a runtime **guard**: calling it while the saga is not in one of the allowed states throws. The guard is installed by `SagaHOW` at compose time so it sits outside the `is command` wrapper.
 
 ```raku
 multi method apply(PaymentReceived (:$booking-id, |)) is on-state('awaiting-payment') {
@@ -1317,7 +1317,7 @@ multi method apply(PaymentReceived $) is on-state('confirmed') { }
 multi method apply(Cancelled $) is on-state(<pending awaiting-payment>) { 'cancelled' }
 ```
 
-**Supported forms**: a single state string (`'pending'`) or a list of states (`<pending processing>`). The selection tests `self.state ~~ any($on-state.list)`.
+**Supported forms**: a single state string (`'pending'`), a list of states (`<pending processing>`), or a junction (`'a' | 'b'`, `none <completed rolled-back>`). A list is treated as membership; anything else is smartmatched directly (`$on-state ~~ $state`), so junctions autothread.
 
 **Selection rules**:
 

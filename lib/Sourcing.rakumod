@@ -191,17 +191,25 @@ multi trait_mod:<is>(Method $r, Str :$projection-id) is export {
 
 =head3 trait_mod:<is>(Method $m, :$on-state)
 
-Tags an C<apply> candidate with the state — or list of states — in which it is
-allowed to run. This is a B<dispatch> key, not a guard wrapper: a saga may
-declare several C<apply> candidates for the same event type, each with a
-different C<on-state>, and the saga metaclass selects the one whose tag matches
-the saga's current state (see L<Metamodel::SagaHOW>). A candidate without an
-C<on-state> tag is a wildcard that runs in any state; tagged candidates take
-precedence and the most specific event type wins. If B<no> candidate matches the
-event in the current state, the saga treats it as a protocol violation: it rolls
-back (emitting its queued anti-events) and moves to the C<'failed'> state. To
-accept an event in a state on purpose — for example to ignore a benign
-duplicate — declare a no-op candidate with the matching C<is on-state(...)>.
+Restricts a saga method to run only in the given state(s). C<$on-state> may be a
+single state (C<'ready'>), a list of states (C<< <ready shipping> >>), or a
+junction (C<'a' | 'b'>, C<none &lt;completed failed&gt;>).
+
+Its effect depends on the method it tags:
+
+=item On an B<C<apply>> candidate it is a B<dispatch key>. A saga may declare
+several C<apply> candidates for the same event type, each with a different
+C<on-state>, and the saga metaclass selects the one whose tag matches the current
+state (see L<Metamodel::SagaHOW>). A candidate without an C<on-state> tag is a
+wildcard; tagged candidates take precedence and the most specific event type
+wins. If B<no> candidate matches the event in the current state, the saga rolls
+back (emitting its queued anti-events) and moves to C<'failed'>. Declare a no-op
+candidate to accept (and ignore) an event in a state on purpose.
+
+=item On any B<other> method (typically a C<command>) it is a runtime B<guard>:
+calling the method while the saga is not in one of the allowed states throws.
+The guard itself is installed by L<Metamodel::SagaHOW> at compose time (so it sits
+outside the C<is command> wrapper); this trait only records the tag.
 
 =end pod
 

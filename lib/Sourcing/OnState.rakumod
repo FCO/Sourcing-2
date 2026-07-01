@@ -24,9 +24,22 @@ has $.on-state;
 
 =head2 method on-state
 
-Returns the state or states this candidate is guarded by (a single value or a
-list).
+Returns the state or states this candidate is guarded by (a single value, a
+list, or a junction).
+
+=head2 method matches($state)
+
+Returns whether C<$state> satisfies this tag. A list (C<Positional>) is treated
+as membership (C<$state ~~ any(@states)>); anything else — a single string or a
+junction such as C<'a' | 'b'> or C<none &lt;a b&gt;> — is smartmatched directly
+(C<$on-state ~~ $state>), so junctions autothread as expected.
 
 =end pod
 
 method on-state { $!on-state }
+
+method matches($state) {
+	$!on-state ~~ Positional
+		?? ($state ~~ any($!on-state.list))
+		!! ($!on-state ~~ $state)
+}

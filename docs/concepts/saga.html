@@ -70,7 +70,7 @@ $*SourcingConfig.emit: $event;                # persist for replay</code></pre>
 
             <h2>State Machine and Per-State Dispatch</h2>
             <p>Sagas use a declarative state machine. Each <code>apply</code> method returns its resulting state (with the return-type syntax <code>--> 'state-name'</code> or simply by returning the string), and the saga tracks the current state in <code>$.state</code>.</p>
-            <p>The <code>is on-state(...)</code> trait is a <strong>dispatch key</strong>, not a guard: a saga may declare <strong>several <code>apply</code> candidates for the same event type</strong>, each tagged with a different state, and the framework runs the one whose tag matches the current state. <code>on-state</code> accepts a single state or a list:</p>
+            <p>On an <code>apply</code> candidate the <code>is on-state(...)</code> trait is a <strong>dispatch key</strong>, not a guard: a saga may declare <strong>several <code>apply</code> candidates for the same event type</strong>, each tagged with a different state, and the framework runs the one whose tag matches the current state. <code>on-state</code> accepts a single state, a list (<code>&lt;a b&gt;</code>), or a junction (<code>'a' | 'b'</code>, <code>none &lt;done failed&gt;</code>). (On a non-<code>apply</code> method such as a <code>command</code>, the same trait is instead a runtime guard that throws when called in the wrong state.)</p>
             <pre><code>multi method apply(PaymentReceived (:$booking-id, |)) is on-state('awaiting-payment') {
     sourcing(Booking, :$booking-id).confirm;
     'confirmed'
