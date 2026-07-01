@@ -37,51 +37,43 @@
             <h2>What It Does</h2>
             <p>Sagas extend aggregations with additional capabilities for coordinating complex business workflows:</p>
             <ul>
-                <li><strong>Undo blocks</strong> — LIFO stack of callable blocks for rollback on failure</li>
-                <li><strong>State machine</strong> — Declarative state transitions via return types</li>
+                <li><strong>Declarative compensation</strong> — <code>anti-event</code> handlers whose inverses are queued on every <code>apply</code> and emitted in reverse on rollback</li>
+                <li><strong>State machine with per-state dispatch</strong> — <code>apply</code> returns the next state; <code>is on-state(...)</code> selects among same-event handlers by current state</li>
                 <li><strong>Timeout support</strong> — Schedule and handle timeouts for long-running processes</li>
                 <li><strong>Aggregation binding</strong> — Lazy loading and tracking of related aggregates</li>
+                <li><strong>Undo blocks</strong> — LIFO escape hatch for compensation that doesn't fit <code>anti-event</code></li>
             </ul>
 
             <h2>How It's Used</h2>
-            <p>You declare a saga using the <code>saga</code> keyword. The metaclass automatically composes the role and generates necessary infrastructure:</p>
+            <p>You declare a saga using the <code>saga</code> keyword. It is event-driven: <code>apply</code> handlers react to events, source the aggregates they coordinate and issue commands; each reaction declares its inverse with <code>anti-event</code>. The metaclass composes the role and generates the necessary infrastructure:</p>
             <pre><code>use Sourcing;
 
 saga AccountTransfer {
-    has Str    $.saga-id is projection-id;
-    has Str    $.state = 'pending';
-    has Account $.from-account;
-    has Account $.to-account;
-    has Rat    $.amount;
+    has Str $.saga-id is projection-id;
+    has Str $.state   = 'pending';
 
-    multi method apply(TransferRequested $e --> 'ready') {
-        $!from-account = sourcing Account, :id($e.from-id);
-        $!to-account   = sourcing Account, :id($e.to-id);
-        $!amount = $e.amount;
-        self.timeout-in: 'cancel-transfer', :5minutes;
-    }
-
-    method execute() is on-state('ready') is command {
-        $!from-account.withdraw: $!amount;
+    multi method apply(TransferRequested (:$from-id, :$to-id, :$amount, |)) is on-state('pending') {
+        sourcing(Account, :id($from-id)).withdraw: :$amount;
+        sourcing(Account, :id($to-id)).deposit: :$amount;
+        self.timeout-in: 'rollback', :5minutes;
         'transferring'
     }
 
-    multi method apply(Withdrawn $e --> 'depositing') {
-        $!to-account.deposit: $!amount;
-        self.undo: *.from-account.reverse-withdraw: $e.amount;
-        self.undo: *.to-account.reverse-deposit: $!amount;
-        self.timeout-in: 'confirm-delivery', :5minutes;
+    multi method apply(TransferConfirmed $) is on-state('transferring') {
+        self.cancel-timeout: 'rollback';
+        'completed'
     }
 
-    multi method apply(Deposited $e --> 'completed') { }
-
-    method cancel-transfer() {
+    # A timeout (or any failure) rolls back; the queued inverse fires in reverse.
+    multi method apply(TransferTimedOut $) is on-state('transferring') {
         self.rollback;
         'cancelled'
     }
 
-    method confirm-delivery() is on-state('depositing') {
-        'completed'
+    # Declarative inverse of the transfer: reverse both legs.
+    multi method anti-event(TransferRequested (:$from-id, :$to-id, :$amount, |)) {
+        sourcing(Account, :id($to-id)).withdrew: :$amount;
+        sourcing(Account, :id($from-id)).deposited: :$amount;
     }
 }</code></pre>
 
@@ -90,7 +82,7 @@ saga AccountTransfer {
             <table>
                 <tr><th>Attribute</th><th>Type</th><th>Description</th></tr>
                 <tr><td><code>$.state</code></td><td>Str</td><td>Current saga state</td></tr>
-                <tr><td><code>@.undo-blocks</code></td><td>Callable</td><td>LIFO stack of undo blocks for rollback</td></tr>
+                <tr><td><code>@.undo-blocks</code></td><td>Callable</td><td>LIFO rollback stack — holds both queued anti-event emitters and manual undo blocks</td></tr>
                 <tr><td><code>@.timeout-schedule</td><td>Pair</td><td>Ordered array of DateTime => Set of handler names</td></tr>
                 <tr><td><code>%.timeout-handlers</code></td><td>Hash</td><td>Handler name => Hash{:date-time, :method-name}</td></tr>
             </table>
@@ -100,16 +92,28 @@ saga AccountTransfer {
             <h3>method start</h3>
             <p>Creates a new saga and emits a <code>SagaCreated</code> event to initialize the saga in the event store.</p>
 
+            <h3>multi method anti-event(EventType $e)</h3>
+            <p>The <strong>declarative</strong> compensation hook (you define it on your saga). For an event the saga reacts to in <code>apply</code>, declare an <code>anti-event</code> multi that builds the inverse — sourcing the target aggregate and calling its <em>emit</em> method (not its command, so it bypasses forward validation). It may produce more than one inverse event.</p>
+            <p>On every <code>apply</code>, the framework runs the matching <code>anti-event</code> under forced replay (so the emit methods only <em>build</em> the inverse events without emitting) and queues them. On <code>rollback</code> the queued inverses are emitted in reverse order. Because this runs inside <code>apply</code>, the queue is rebuilt on every reconstruction — compensation is durable with no extra persistence and no manual <code>self.undo</code>.</p>
+            <pre><code>multi method apply(StepRequested (:$item, :$amount, |)) is on-state('open') {
+    sourcing(Inventory, :$item).reserve: :$amount;
+    'reserved'
+}
+multi method anti-event(StepRequested (:$item, :$amount, |)) {
+    sourcing(Inventory, :$item).stock-released: :$amount;   # emit, not command
+}</code></pre>
+
+            <h3>method queue-compensation(%rec)</h3>
+            <p>Internal. Called by the metaclass while applying an event whose <code>anti-event</code> produced an inverse; pushes a deferred re-emit block (carrying the built event, its target type and ids) onto the rollback stack. You normally don't call this directly.</p>
+
             <h3>method undo(Callable $block)</h3>
-            <p>Stores a callable (undo block) on the LIFO stack for potential rollback. Unlike compensation events which are emitted to the event store, undo blocks are executed directly during rollback. This is useful for calling methods directly on aggregates without generating new events.</p>
-            <p>During rollback, all undo blocks are executed in reverse order (LIFO). The blocks receive the saga as the topic (<code>$_</code>), allowing method chaining:</p>
+            <p>Escape hatch for compensation that doesn't fit <code>anti-event</code>. Stores a callable on the same LIFO stack used by queued anti-events; during rollback the block is executed directly (it receives the saga as the topic <code>$_</code>, allowing method chaining). Unlike <code>anti-event</code>, undo blocks are <strong>not</strong> rebuilt on reconstruction, so prefer <code>anti-event</code> for durable compensation.</p>
             <pre><code># After withdrawing from an account, register the undo block
 $!account.withdraw: 100;
 $.undo: *.account.reverse-withdraw: 100;
 
 # During rollback, this block executes:
 # $!account.reverse-withdraw: 100;</code></pre>
-            <p><strong>Note:</strong> Undo blocks complement compensation events — use events when you need auditability, use undo blocks for direct aggregate manipulation.</p>
 
             <h3>method timeout-in(Str $method-name, *%params)</h3>
             <p>Schedules a timeout that fires after a specified duration. If no method name is provided (or if the method name is <code>'rollback'</code>), the default <code>rollback</code> method will be called when the timeout fires:</p>
@@ -122,8 +126,8 @@ $.undo: *.account.reverse-withdraw: 100;
             <p><strong>Default behavior:</strong> If you call <code>self.timeout-in: 'rollback', :5minutes</code> or simply don't specify a method name that exists, the timeout will automatically call <code>self.rollback</code> when it fires. This is useful for automatically canceling long-running processes that exceed their time limit.</p>
             <p><strong>Note:</strong> Can only be called from within an <code>apply()</code> method.</p>
 
-            <h3>method rollback() is command</h3>
-            <p>Emits all registered compensations in LIFO order and executes all undo blocks in reverse order. Clears both stacks. Called automatically when any exception is thrown.</p>
+            <h3>method rollback()</h3>
+            <p>Emits the queued anti-events (and runs any undo blocks) in reverse order, then clears the stack. Idempotent and replay-safe: a second call is a no-op, and the inverses are emitted only when running live — during replay they are already in the stream. Called automatically when a method throws an uncaught exception (the saga also moves to <code>'failed'</code>) or when an event reaches the saga that no <code>apply</code> candidate handles in the current state; you may also call it explicitly, typically from an <code>apply</code> handler for a failure or timeout event.</p>
 
             <h3>method verify-timeouts() is command</h3>
             <p>Iterates over the ordered timeout schedule. While the next entry's DateTime is <code>&lt;= DateTime.now</code>, emits <code>TimedOut</code> events. Should be called periodically (e.g., every 10 seconds) by an external scheduler.</p>
@@ -159,15 +163,15 @@ $.undo: *.account.reverse-withdraw: 100;
                 <li><strong>Canceling</strong> — Call <code>self.cancel-timeout("handler")</code> to remove</li>
             </ol>
 
-            <h2>State Machine</h2>
-            <p>Each <code>apply</code> method declares its resulting state via the return type syntax <code>--> 'state-name'</code>. The saga automatically tracks the current state in <code>$.state</code>.</p>
-            <p>Command methods can use the <code>is on-state('state-name')</code> trait to restrict them to specific states.</p>
+            <h2>State Machine and Per-State Dispatch</h2>
+            <p>Each <code>apply</code> method returns its resulting state (via <code>--> 'state-name'</code> or by returning the string). The saga tracks the current state in <code>$.state</code>.</p>
+            <p>The <code>is on-state(...)</code> trait is a <strong>dispatch key</strong>: a saga may declare several <code>apply</code> candidates for the same event type, each tagged with a different state (or list of states), and the framework runs the one matching the current state. Untagged candidates are wildcards; tagged candidates and the most specific event type win. If no candidate matches the event in the current state, the saga rolls back and moves to <code>'failed'</code> — declare a no-op candidate to accept (and ignore) an event in a state on purpose.</p>
 
             <h2>See Also</h2>
             <ul>
                 <li><a href="metaclasses.html">Metaclasses</a> — how the <code>saga</code> keyword works via <code>Metamodel::SagaHOW</code></li>
                 <li><a href="aggregation.html">Sourcing::Aggregation</a> — sagas inherit aggregation functionality</li>
-                <li><a href="traits.html">Traits</a> — the <code>is on-state</code> trait for state guards</li>
+                <li><a href="traits.html">Traits</a> — the <code>is on-state</code> trait for per-state dispatch</li>
             </ul>
         </div>
     </main>

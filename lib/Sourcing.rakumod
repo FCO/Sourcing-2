@@ -196,10 +196,12 @@ allowed to run. This is a B<dispatch> key, not a guard wrapper: a saga may
 declare several C<apply> candidates for the same event type, each with a
 different C<on-state>, and the saga metaclass selects the one whose tag matches
 the saga's current state (see L<Metamodel::SagaHOW>). A candidate without an
-C<on-state> tag is a wildcard that runs in any state. When no candidate matches
-the current state the event is a no-op, so duplicate or late events are simply
-dropped; intentional compensation is modeled explicitly (an event whose handler
-calls C<rollback>), not as a side effect of an unexpected event.
+C<on-state> tag is a wildcard that runs in any state; tagged candidates take
+precedence and the most specific event type wins. If B<no> candidate matches the
+event in the current state, the saga treats it as a protocol violation: it rolls
+back (emitting its queued anti-events) and moves to the C<'failed'> state. To
+accept an event in a state on purpose — for example to ignore a benign
+duplicate — declare a no-op candidate with the matching C<is on-state(...)>.
 
 =end pod
 

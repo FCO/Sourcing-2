@@ -219,7 +219,7 @@ The aggregate is the gatekeeper. Every state change must pass through it. It ans
 | Property | Description |
 |---|---|
 | **State machine** | Sagas track their progress through named states. State transitions are declared via the return type of `apply()` methods (e.g., `--> 'order-created'`). |
-| **Compensating transactions** | Each step can register a compensation event. If the saga fails, `rollback()` emits compensations in LIFO order. |
+| **Declarative compensation (anti-events)** | For an event the saga reacts to, declare a `multi method anti-event(EventType $e)` that builds the inverse. The framework queues those inverses on every `apply` (rebuilt on each reconstruction, so compensation is durable) and `rollback()` emits them in reverse order. A `self.undo(&block)` LIFO escape hatch remains for cases that don't fit. |
 | **Commands during replay are skipped** | When `^update` replays events, any commands called inside `apply()` return `Nil` immediately (via `$*SourcingReplay`). This prevents double-execution of commands on other aggregations. |
 | **Incremental update** | `^update` restores cached state and applies only new events. Already-consumed events replay with commands skipped, new events replay with commands running. |
 | **Cache required** | Sagas require a caching-capable plugin. Without cache, the saga cannot distinguish consumed from unconsumed events. `sourcing(SagaType, ...)` fails if the plugin doesn't support caching. |
@@ -228,12 +228,12 @@ The aggregate is the gatekeeper. Every state change must pass through it. It ans
 
 **Best practices:**
 
-1. **apply() records state, commands execute actions.** apply() methods should primarily update the saga's internal state. Commands on other aggregations can be called from apply() — they are automatically skipped during replay via `$*SourcingReplay`.
-2. **Register compensations early.** Call `self.register-compensation: $event` as soon as a step succeeds, so rollback is always possible.
-3. **Use explicit state names.** The return type syntax `--> 'state-name'` on apply methods declares the new state. Keep state names descriptive and consistent.
-4. **Guard commands with `is on-state()`.** Use the trait to ensure commands only run in valid states. Supports junctions: `is on-state('pending' | 'processing')`.
+1. **Stay event-driven.** `apply()` methods react to events: they source the aggregates the saga coordinates and issue commands, returning the next state. Commands called from `apply()` are skipped during replay via `$*SourcingReplay`.
+2. **Declare an `anti-event` per reaction.** For every event the saga reacts to, declare a `multi method anti-event(EventType $e)` that builds the inverse. The framework queues it automatically on each `apply`, so rollback is always possible without manual bookkeeping.
+3. **Use explicit state names.** The return type syntax `--> 'state-name'` (or simply returning the string) declares the new state. Keep state names descriptive and consistent.
+4. **Dispatch by state with `is on-state()`.** Tag `apply` candidates so the right one runs per state; declare a no-op candidate to accept (and ignore) an event in a state on purpose. Accepts a single state or a list (`<a b>`).
 5. **Commands may be retried after crashes.** If a saga crashes mid-execution, unprocessed events are re-applied on restart, which may re-run commands. Target aggregations should handle idempotent commands.
-6. **Any unhandled exception triggers compensation.** If any method (including `apply()` or command methods) throws an exception, the saga automatically emits all registered compensations in LIFO order and transitions to the `'failed'` state.
+6. **Unhandled exception or unmatched event triggers compensation.** If any method throws an uncaught exception, or an event reaches the saga that no `apply` candidate handles in the current state, the saga rolls back (emitting its queued anti-events in reverse) and transitions to the `'failed'` state.
 
 **Example — An order creation saga:**
 
@@ -250,46 +250,34 @@ class OrderCancelled   { has $.order-id }
 class CreditReleased   { has $.order-id }
 
 saga CreateOrder {
-    has Str  $.saga-id is projection-id;
-    has Str  $.state = 'pending';
-    has Order    $.order;
-    has Customer $.customer;
+    has Str $.saga-id is projection-id;
+    has Str $.state   = 'pending';
 
-    # Step 1: Handle request
-    multi method apply(OrderRequested $e --> 'order-creating') {
-        $!customer = sourcing Customer, :id($e.customer-id);
-        $.order-created: :customer-id($e.customer-id), :total($e.total);
-        self.register-compensation: OrderCancelled.new(:order-id($!order-id));
+    # Step 1: handle the request — open the order, reserve credit.
+    multi method apply(OrderRequested (:$order-id, :$customer-id, :$total, |)) is on-state('pending') {
+        sourcing(Order,    :id($order-id)).open: :$customer-id, :$total;
+        sourcing(Customer, :id($customer-id)).reserve-credit: :amount($total);
+        self.timeout-in: 'rollback', :30minutes;
+        'reserving'
     }
 
-    # Step 2: Order created, reserve credit
-    multi method apply(OrderCreated $e --> 'credit-reserving') {
-        $!order = sourcing Order, :id($e.order-id);
-        $!customer.reserve-credit: :amount($e.total);
-        self.register-compensation: OrderCancelled.new(:order-id($e.order-id));
-        # Schedule a 30-minute timeout for the credit reservation
-        self.timeout-in: 'expire-reservation', :30minutes;
+    # Step 2: credit reserved, process payment.
+    multi method apply(CreditReserved (:$order-id, :$amount, |)) is on-state('reserving') {
+        self.cancel-timeout: 'rollback';
+        sourcing(Order, :id($order-id)).pay: :$amount;
+        'completed'
     }
 
-    # Step 3: Credit reserved, process payment
-    multi method apply(CreditReserved $e --> 'processing-payment') {
-        $.payment-processed: :amount($e.amount);
-    }
-
-    multi method apply(CreditRejected $e --> 'failed') {
+    # A failure or timeout event drives rollback — purely event-driven.
+    multi method apply(CreditRejected $) is on-state('reserving') {
         self.rollback;
+        'failed'
     }
 
-    # Timeout handler — called automatically when the timeout fires
-    method expire-reservation() {
-        self.rollback;
-        'expired'
-    }
-
-    # Commands guarded by state
-    method cancel() is on-state(none <completed failed expired>) is command {
-        self.rollback;
-        'cancelled'
+    # Declarative inverses, queued automatically and emitted in reverse on rollback.
+    multi method anti-event(OrderRequested (:$order-id, :$customer-id, :$total, |)) {
+        sourcing(Customer, :id($customer-id)).credit-released: :amount($total);
+        sourcing(Order,    :id($order-id)).cancelled;
     }
 }
 ```
@@ -360,7 +348,7 @@ Ask these questions:
 | `is projection-id<>`       | Trait    | Shorthand for single ID mapping                        |
 | `is command`               | Trait    | Wraps method with reset, replay, validation, and auto-retry |
 | `is command(False)`        | Trait    | Marks a method as explicitly NOT a command. Prevents `AggregationHOW` from auto-generating an event-emitting method with the same name. |
-| `is on-state()`            | Trait    | Guards command execution to specific saga states (supports junctions) |
+| `is on-state()`            | Trait    | Per-state dispatch key for saga `apply` candidates (single state or list) |
 
 **Public API**:
 
@@ -640,24 +628,32 @@ method projection-id-map { %!projection-id-map }
 |---|---|
 | **Inherits from aggregation** | A saga is both an aggregation and a projection. It can emit events (via inherited command methods) and consume events (via `apply` methods). |
 | **State machine** | Each `apply` method declares its resulting state via the return type syntax `--> 'state-name'`. The saga transitions through named states as events are processed. |
-| **Compensation stack** | Sagas maintain a LIFO stack of compensation events registered via `register-compensation`. On failure, `rollback()` emits them in reverse order. |
+| **Declarative compensation** | For an event the saga reacts to, a `multi method anti-event(EventType $e)` builds the inverse. The framework queues those inverses on every `apply` (rebuilt on each reconstruction), and `rollback()` emits them in reverse order. A `self.undo(&block)` LIFO escape hatch shares the same stack. |
 | **Aggregation binding** | Attributes typed as aggregations are loaded lazily via `sourcing()` when the saga binds to them. |
 | **Timeout scheduling** | Timeouts can be scheduled with `timeout-in($duration, 'handler-name')`. |
-| **Exception handling** | Any unhandled exception in an `apply` or command method triggers automatic compensation and transitions to `'failed'` state. |
+| **Exception / unmatched event handling** | An unhandled exception in any method, or an event no `apply` candidate handles in the current state, triggers rollback and transitions to `'failed'` state. |
 
 **Attributes**:
 ```raku
-has Str  $.state;                   # Current saga state
-has Mu   @!compensations;           # LIFO stack of compensation events
-has Pair @!timeout-schedule;        # Array of Pair — DateTime => Set of method-names, kept ordered
-has Hash %!timeout-handlers{Str}; # method-name => Hash{:date-time, :method-name}
+has Str      $.state;            # Current saga state
+has Callable @!undo-blocks;      # LIFO rollback stack (queued anti-events + manual undo blocks)
+has Bool     $!rolled-back;      # Guards rollback idempotency / replay-safety
+has Pair     @.timeout-schedule; # Array of Pair — DateTime => Set of method-names, kept ordered
+has Hash     $!timeout-handlers; # method-name => scheduled-at
 ```
 
 **Public Methods**:
 ```raku
-method register-compensation(Mu $event)
-# Adds compensation event to the LIFO stack.
-# Call immediately after a step succeeds so rollback is always possible.
+multi method anti-event(EventType $e)
+# Declarative compensation hook you define on the saga: builds the inverse of
+# what apply(EventType) does by sourcing the aggregate and calling its emit
+# method (not its command). The framework queues each built inverse; rollback()
+# emits them in reverse. Rebuilt on every reconstruction, so it needs no
+# extra persistence.
+
+method undo(Callable $block)
+# Escape hatch: pushes a block onto the same LIFO rollback stack, run directly
+# during rollback. Not rebuilt on reconstruction — prefer anti-event.
 
 method timeout-in(Str $method-name, *%params)
 # Schedules a timeout:
@@ -667,10 +663,12 @@ method timeout-in(Str $method-name, *%params)
 # 4. Emits TimeOutScheduled event with the method-name and scheduled-at
 # Can only be called from within an apply() method.
 
-method rollback() is command
-# Emits all registered compensations in LIFO order.
-# Clears the compensation stack.
-# Called automatically when any exception is thrown.
+method rollback()
+# Emits the queued anti-events (and runs any undo blocks) in reverse order,
+# then clears the stack. Idempotent and replay-safe: a second call is a no-op,
+# and inverses are emitted only when running live. Called automatically on an
+# uncaught exception or an unmatched event (the saga also moves to 'failed');
+# may also be called explicitly, e.g. from a failure/timeout apply handler.
 
 method verify-timeouts() is command
 # Iterates over @!timeout-schedule (which is ordered by DateTime)
@@ -759,49 +757,25 @@ class SagaAggregationBound {
 
 ```raku
 saga AccountTransfer {
-    has Str    $.saga-id is projection-id;
-    has Str    $.state = 'pending';
-    has Account $.from-account;
-    has Account $.to-account;
-    has Rat    $.amount;
+    has Str $.saga-id is projection-id;
+    has Str $.state   = 'pending';
 
-    multi method apply(TransferRequested $e --> 'ready') {
-        $!from-account = sourcing Account, :id($e.from-id);
-        $!to-account   = sourcing Account, :id($e.to-id);
-        $!amount = $e.amount;
-        self.timeout-in: 'cancel-transfer', :5minutes;
-    }
-
-    method execute() is on-state('ready') is command {
-        $!from-account.withdraw: $!amount;
+    multi method apply(TransferRequested (:$from-id, :$to-id, :$amount, |)) is on-state('pending') {
+        sourcing(Account, :id($from-id)).withdraw: :$amount;
+        sourcing(Account, :id($to-id)).deposit: :$amount;
+        # Auto-cancel if the transfer isn't confirmed in time.
+        self.timeout-in: 'rollback', :5minutes;
         'transferring'
     }
 
-    multi method apply(Withdrawn $e --> 'depositing') {
-        $!to-account.deposit: $!amount;
-        self.register-compensation: WithdrawnReversed.new(:id($e.id), :amount($e.amount));
-        self.register-compensation: DepositedReversed.new(:id($e.id), :amount($!amount));
-        # Replace the cancellation timeout (scheduled earlier) with a delivery confirmation timeout
-        # Calling timeout-in with the same handler name automatically replaces the previous timeout
-        self.timeout-in: 'confirm-delivery', :5minutes;
+    multi method apply(TransferConfirmed $ --> 'completed') {
+        self.cancel-timeout: 'rollback';
     }
 
-    multi method apply(Deposited $e --> 'completed') { }
-
-    # Timeout handler — called automatically when the timeout fires
-    method cancel-transfer() {
-        self.rollback;
-        'cancelled'
-    }
-
-    method confirm-delivery() is on-state('depositing') {
-        # Final confirmation step
-        'completed'
-    }
-
-    method cancel() is on-state(none <completed rolled-back>) is command {
-        self.rollback;
-        'rolled-back'
+    # A timeout fires 'rollback' directly; the queued inverse reverses both legs.
+    multi method anti-event(TransferRequested (:$from-id, :$to-id, :$amount, |)) {
+        sourcing(Account, :id($to-id)).withdrew: :$amount;
+        sourcing(Account, :id($from-id)).deposited: :$amount;
     }
 }
 
@@ -1301,24 +1275,19 @@ saga MySaga {
     has Order    $.order;       # Aggregation-typed attribute
     has Customer $.customer;     # Late binding via $!customer .= new: :id(42)
 
-    # State transitions via apply() return types
-    multi method apply(OrderRequested $e --> 'creating') {
+    # State transitions via apply() return values; per-state dispatch via on-state
+    multi method apply(OrderRequested $e --> 'credit-reserving') is on-state('pending') {
+        $!order    = sourcing Order, :id($e.order-id);
         $!customer = sourcing Customer, :id($e.customer-id);
-        $.order-created: :customer-id($e.customer-id), :total($e.total);
-    }
-
-    multi method apply(OrderCreated $e --> 'credit-reserving') {
-        $!order = sourcing Order, :id($e.order-id);
         $!customer.reserve-credit: :amount($e.total);
-        self.register-compensation: OrderCancelled.new(:order-id($e.order-id));
     }
 
-    multi method apply(CreditReserved $e --> 'completed') { }
+    multi method apply(CreditReserved $ --> 'completed') is on-state('credit-reserving') { }
 
-    # State-guarded command
-    method cancel() is on-state(none <completed rolled-back>) is command {
-        self.rollback;
-        'rolled-back'
+    # Declarative inverse, queued automatically and emitted on rollback.
+    multi method anti-event(OrderRequested $e) {
+        sourcing(Customer, :id($e.customer-id)).credit-released: :amount($e.total);
+        sourcing(Order,    :id($e.order-id)).cancelled;
     }
 }
 ```
@@ -1326,34 +1295,37 @@ saga MySaga {
 **What happens**:
 1. `saga` constant triggers `Metamodel::SagaHOW` (extends AggregationHOW)
 2. Adds `Sourcing::Projection`, `Sourcing::Aggregation`, and `Sourcing::Saga` roles
-3. Validates that all `is on-state()` guards reference known states
-4. Generates `apply` handlers for internal events: `TimeOutScheduled`, `TimedOut`, `SagaCreated`, `SagaAggregationBound`
-5. Discovers aggregation-typed attributes and generates binding accessors
-6. Wraps all methods with exception handling for automatic compensation
+3. Generates `apply` handlers for internal events: `TimeOutScheduled`, `TimedOut`, `SagaCreated`, `SagaAggregationBound`
+4. Discovers aggregation-typed attributes and generates binding accessors
+5. Wraps user methods with exception handling for automatic compensation
+6. Replaces `apply` dispatch with a single state-aware dispatcher that also runs the state-machine transition and anti-event capture
 
 ### The `is on-state()` Trait
 
-The `is on-state()` trait guards command execution to specific saga states. It prevents commands from running when the saga is in an invalid state.
+The `is on-state()` trait tags a saga `apply` candidate with the state — or list of states — in which it may run. It is a **dispatch key**, not a guard wrapper: a saga may declare several `apply` candidates for the same event type, each tagged with a different state, and the metaclass runs the one whose tag matches the saga's current state.
 
 ```raku
-method cancel() is on-state('pending') is command { ... }
-method retry() is on-state('pending' | 'failed') is command { ... }
-method expire() is on-state(none <completed rolled-back>) is command { ... }
-method process() is on-state(any <pending processing>) is command { ... }
+multi method apply(PaymentReceived (:$booking-id, |)) is on-state('awaiting-payment') {
+    sourcing(Booking, :$booking-id).confirm;
+    'confirmed'
+}
+
+# Same event, later state — a duplicate/late payment is a deliberate no-op.
+multi method apply(PaymentReceived $) is on-state('confirmed') { }
+
+# A list of states is accepted too.
+multi method apply(Cancelled $) is on-state(<pending awaiting-payment>) { 'cancelled' }
 ```
 
-**Supported forms**:
+**Supported forms**: a single state string (`'pending'`) or a list of states (`<pending processing>`). The selection tests `self.state ~~ any($on-state.list)`.
 
-| Form | Example | Description |
-|---|---|---|
-| Single string | `'pending'` | Only in the named state |
-| Junction (any) | `'pending' \| 'processing'` | In any of the listed states |
-| Junction (none) | `none <completed rolled-back>` | In none of the listed states |
-| Junction (all) | `all <ready processing>` | In all listed states (uncommon) |
+**Selection rules**:
 
-The trait uses Raku's smartmatch operator (`~~`) to check the current state against the guard.
+- A candidate without an `on-state` tag is a wildcard that runs in any state.
+- `on-state` candidates take precedence over the wildcard, and the most specific event type wins (a catch-all `apply(Any)` never shadows a specific handler).
+- If **no** candidate matches the event in the current state, the saga rolls back (emitting its queued anti-events) and moves to `'failed'`. Declare a no-op candidate to accept (and ignore) an event in a state on purpose.
 
-**Validation**: At compose time, `SagaHOW` validates that all `is on-state()` guards reference states declared in `apply` method return types. Unknown state names cause a compile-time error.
+> **Note:** `on-state` is read for saga `apply` candidates. Tagging a non-`apply` method has no effect on dispatch.
 
 ### Projection ID Mapping
 
