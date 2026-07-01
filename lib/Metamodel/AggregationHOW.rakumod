@@ -62,6 +62,14 @@ method compose(Mu $aggregation, |) {
 				$curr-version-attr.set_value: SELF, $current-version + 1;
 			}
 
+			# Opt-in capture of built events for saga anti-event compensation.
+			# Inert unless an enclosing scope has declared @*SourcingEvents
+			# (e.g. SagaHOW's apply wrapper while building an anti-event). We
+			# record the event together with the data needed to re-emit it.
+			with @*SourcingEvents {
+				.push: %( :event($new-event), :type(SELF.WHAT), :ids(%ids) );
+			}
+
 			return $new-event
 		}
 	}

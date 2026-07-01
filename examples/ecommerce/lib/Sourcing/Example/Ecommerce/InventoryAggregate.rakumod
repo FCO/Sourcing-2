@@ -19,7 +19,7 @@ The Inventory aggregate manages product stock levels. It handles:
 
 =end pod
 
-unit class Sourcing::Example::Ecommerce::InventoryAggregate is aggregation;
+unit aggregation Sourcing::Example::Ecommerce::InventoryAggregate;
 
 has Str $.item-id is projection-id;
 has Int $.available = 0;
@@ -77,7 +77,7 @@ Command to reserve inventory for an order.
 
 =end pod
 
-method reserve(Str :$order-id, Int :$quantity) {
+method reserve(Str :$order-id, Int :$quantity) is command {
     die "Insufficient inventory. Available: $!available, Requested: $quantity"
         if $!available < $quantity;
     
@@ -97,7 +97,7 @@ Command to release inventory reserved for an order.
 
 =end pod
 
-method release(Str :$order-id) {
+method release(Str :$order-id) is command {
     my $quantity = %.reservations{$order-id} // 0;
     die "No reservation found for order $order-id" unless $quantity;
     
@@ -117,7 +117,7 @@ Command to adjust inventory levels.
 
 =end pod
 
-method adjust(Int :$quantity-change, Str :$reason) {
+method adjust(Int :$quantity-change, Str :$reason) is command {
     self.inventory-adjusted(
         :item-id($!item-id),
         :$quantity-change,

@@ -16,19 +16,19 @@ maintains payment status and history for querying.
 
 =end pod
 
-unit class Sourcing::Example::Ecommerce::PaymentProjection is projection;
+unit projection Sourcing::Example::Ecommerce::PaymentProjection;
 
 has Str $.payment-id is projection-id;
 has Str $.order-id;
-has Numeric $.amount = 0;
+has Rat $.amount = 0.0;
 has Str $.method;
 has Str $.status = 'initiated';
 has Str $.authorization-code;
 has DateTime $.authorized-at;
 has DateTime $.captured-at;
 has DateTime $.failed-at;
-has Numeric $.captured-amount = 0;
-has Numeric $.refunded-amount = 0;
+has Rat $.captured-amount = 0.0;
+has Rat $.refunded-amount = 0.0;
 has Str $.failure-reason;
 has Str $.refund-reason;
 

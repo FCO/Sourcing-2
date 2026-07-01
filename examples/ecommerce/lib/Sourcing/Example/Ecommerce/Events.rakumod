@@ -13,7 +13,11 @@ aggregations to track state changes and by projections to build read models.
 
 =end pod
 
-unit module Sourcing::Example::Ecommerce::Events;
+# NOTE: these event classes are deliberately NOT wrapped in a `unit module`.
+# AggregationHOW derives each auto-generated emit method from the event class's
+# short name (e.g. InventoryAdjusted -> inventory-adjusted). Inside a unit
+# module the names become fully qualified, which breaks that mapping, so the
+# classes live at the top level and are shared via `is export`.
 
 # Order Events
 class OrderCreated is export {
@@ -28,7 +32,7 @@ class OrderItemAdded is export {
     has Str $.order-id;
     has Str $.item-id;
     has Int $.quantity;
-    has Numeric $.unit-price;
+    has Rat $.unit-price;
 }
 
 class OrderSubmitted is export {
@@ -74,7 +78,7 @@ class InventoryAdjusted is export {
 class PaymentInitiated is export {
     has Str $.payment-id;
     has Str $.order-id;
-    has Numeric $.amount;
+    has Rat $.amount;
     has Str $.method;  # credit-card, debit, paypal
     has Str $.status = 'pending';
 }
@@ -87,7 +91,7 @@ class PaymentAuthorized is export {
 
 class PaymentCaptured is export {
     has Str $.payment-id;
-    has Numeric $.captured-amount;
+    has Rat $.captured-amount;
     has DateTime $.captured-at;
 }
 
@@ -99,7 +103,24 @@ class PaymentFailed is export {
 
 class PaymentRefunded is export {
     has Str $.payment-id;
-    has Numeric $.refunded-amount;
+    has Rat $.refunded-amount;
     has Str $.reason;
     has DateTime $.refunded-at;
+}
+# Saga trigger events (the OrderFulfillmentSaga's own stream, keyed by saga-id).
+class FulfillmentRequested is export {
+    has Str $.saga-id  is required;
+    has Str $.order-id  is required;
+    has Str $.item-id   is required;
+    has Int $.quantity  is required;
+    has Rat $.amount    is required;
+}
+
+class FulfillmentCancelled is export {
+    has Str $.saga-id is required;
+}
+
+class FulfillmentConfirmed is export {
+    has Str $.saga-id  is required;
+    has Str $.order-id is required;
 }

@@ -1,0 +1,82 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+
+# Exercises the broadcast example modules directly (examples/Broadcast/*), the
+# way t/19 and t/21 do for Hotel and ecommerce. The broadcast saga is the
+# canonical showcase of per-step declarative compensation: each channel send is
+# its own event with a retraction anti-event, and rollback emits them reversed.
+use lib 'examples';
+use Broadcast::Events;
+use Broadcast::ChannelAggregate;
+use Broadcast::BroadcastSaga;
+
+plan 4;
+
+sub reset() { Sourcing::Plugin::Memory.use }
+
+# Idiomatic dispatch: rebuild from history, apply live, then persist.
+sub dispatch(Str $saga-id, $event) {
+    my $s = sourcing BroadcastSaga, :$saga-id;
+    $s.apply: $event;
+    $*SourcingConfig.emit: $event;
+    $s
+}
+
+sub messages(Str $channel) { (sourcing ChannelAggregate, :$channel).messages }
+
+subtest 'a broadcast reaches every targeted channel' => {
+    reset();
+
+    my $saga;
+    for <#general #random #announcements> -> $channel {
+        $saga = dispatch 'B1',
+            ChannelTargeted.new(:saga-id<B1>, :$channel, :message<Hello>, :user<alice>);
+    }
+
+    is $saga.state, 'broadcasting', 'saga is broadcasting';
+    is messages('#general').elems,       1, '#general got the message';
+    is messages('#random').elems,        1, '#random got the message';
+    is messages('#announcements').elems, 1, '#announcements got the message';
+    is messages('#general')[0], 'Hello', 'the original message was posted';
+};
+
+subtest 'aborting retracts every sent channel via anti-events' => {
+    reset();
+
+    dispatch 'B2', ChannelTargeted.new(:saga-id<B2>, :channel<#general>, :message<Ping>, :user<bob>);
+    dispatch 'B2', ChannelTargeted.new(:saga-id<B2>, :channel<#random>,  :message<Ping>, :user<bob>);
+
+    my $saga = dispatch 'B2', BroadcastAborted.new(:saga-id<B2>);
+    is $saga.state, 'aborted', 'saga is aborted';
+
+    is messages('#general').tail, '[Retracted] Ping', '#general got a retraction';
+    is messages('#random').tail,  '[Retracted] Ping', '#random got a retraction';
+    is messages('#general').elems, 2, '#general has the message and its retraction';
+};
+
+subtest 'retractions are emitted in reverse order' => {
+    reset();
+
+    # Two sends to the SAME channel, then abort: the retractions must undo them
+    # newest-first (LIFO), which is what queued anti-events guarantee.
+    dispatch 'B3', ChannelTargeted.new(:saga-id<B3>, :channel<#log>, :message<first>,  :user<carol>);
+    dispatch 'B3', ChannelTargeted.new(:saga-id<B3>, :channel<#log>, :message<second>, :user<carol>);
+    dispatch 'B3', BroadcastAborted.new(:saga-id<B3>);
+
+    is-deeply messages('#log').List,
+        ('first', 'second', '[Retracted] second', '[Retracted] first'),
+        'sends then retractions in reverse (second retracted before first)';
+};
+
+subtest 'aborting before any broadcast is a protocol violation' => {
+    reset();
+
+    # BroadcastAborted is only handled on-state('broadcasting'); from 'idle' no
+    # candidate matches, so the saga rolls back (nothing queued) and fails.
+    my $saga = dispatch 'B4', BroadcastAborted.new(:saga-id<B4>);
+    is $saga.state, 'failed', 'unexpected abort drives the saga to failed';
+    is (sourcing BroadcastSaga, :saga-id<B4>).state, 'failed', 'failure is durable on replay';
+};
+
+done-testing;

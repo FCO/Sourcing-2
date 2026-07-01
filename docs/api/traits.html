@@ -61,6 +61,34 @@
             <pre><code>method apply(MyEvent $e) is projection-id-map{ id => "x" } { }
 # Maps the event's 'x' field to the projection's 'id' attribute</code></pre>
 
+            <h2>is on-state (on a saga method)</h2>
+            <p>Restricts a saga method to the given state(s). The value may be a single state (<code>'ready'</code>), a list (<code>&lt;ready shipping&gt;</code>), or a junction (<code>'a' | 'b'</code>, <code>none &lt;completed failed&gt;</code>). Its effect depends on the method it tags.</p>
+
+            <h3>On an <code>apply</code> candidate — a dispatch key</h3>
+            <p>A saga can declare several <code>apply</code> candidates for the same event type, each tagged with a different state, and the framework runs the one whose tag matches the current state.</p>
+            <pre><code>multi method apply(PaymentReceived (:$booking-id, |)) is on-state('awaiting-payment') {
+    sourcing(Booking, :$booking-id).confirm;
+    'confirmed'
+}
+
+# Same event, later state — a duplicate/late payment is a deliberate no-op.
+multi method apply(PaymentReceived $) is on-state('confirmed') { }
+
+# A list of states is accepted too.
+multi method apply(Cancelled $) is on-state(<pending awaiting-payment>) { 'cancelled' }</code></pre>
+            <ul>
+                <li>An <code>apply</code> candidate <strong>without</strong> <code>on-state</code> is a wildcard that runs in any state.</li>
+                <li><code>on-state</code> candidates take precedence over the wildcard, and the most specific event type wins (so a catch-all <code>apply(Any)</code> never shadows a specific handler).</li>
+                <li>If <strong>no</strong> candidate matches the event in the current state, the saga rolls back (emitting its queued anti-events) and moves to <code>'failed'</code>. Declare a no-op candidate to accept (and ignore) an event in a state on purpose.</li>
+            </ul>
+
+            <h3>On any other method — a runtime guard</h3>
+            <p>On a non-<code>apply</code> method (typically a <code>command</code>), <code>on-state</code> is a guard: calling it while the saga is not in one of the allowed states throws. The guard is installed outside the <code>is command</code> wrapper.</p>
+            <pre><code>method ship() is on-state('ready') is command {
+    $.order-shipped: :tracking(self.generate-tracking);
+}
+# Calling .ship when $.state ne 'ready' throws.</code></pre>
+
             <h2>See Also</h2>
             <ul>
                 <li><a href="../concepts/commands.html">Commands Concept</a> — detailed explanation of command behavior</li>

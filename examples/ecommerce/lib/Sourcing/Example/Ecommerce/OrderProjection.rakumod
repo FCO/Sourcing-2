@@ -16,7 +16,7 @@ tracks all order events and maintains current order state for fast reads.
 
 =end pod
 
-unit class Sourcing::Example::Ecommerce::OrderProjection is projection;
+unit projection Sourcing::Example::Ecommerce::OrderProjection;
 
 has Str $.order-id is projection-id;
 has Str $.customer-id;
@@ -27,7 +27,7 @@ has DateTime $.submitted-at;
 has DateTime $.cancelled-at;
 has DateTime $.completed-at;
 has Str $.cancellation-reason;
-has Numeric $.total = 0;
+has Rat $.total = 0.0;
 
 =begin pod
 
@@ -41,7 +41,7 @@ multi method apply(OrderCreated $e) {
     $!order-id = $e.order-id;
     $!customer-id = $e.customer-id;
     $!created-at = $e.created-at // DateTime.now;
-    $!items = $e.items;
+    %!items = $e.items;
     $!status = $e.status // 'pending';
     $!total = self.calculate-total;
 }

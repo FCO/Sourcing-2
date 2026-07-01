@@ -16,7 +16,7 @@ maintains current stock levels and reservation status for fast queries.
 
 =end pod
 
-unit class Sourcing::Example::Ecommerce::InventoryProjection is projection;
+unit projection Sourcing::Example::Ecommerce::InventoryProjection;
 
 has Str $.item-id is projection-id;
 has Int $.available = 0;

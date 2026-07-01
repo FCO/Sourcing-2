@@ -1,0 +1,40 @@
+use Test;
+
+# Smoke test for the runnable demo scripts under examples/.
+#
+# These `.raku` files are end-to-end demonstrations, not modules, so the other
+# test files never load them. Here we actually execute each one in a fresh Raku
+# process and assert it exits cleanly. This catches compilation or runtime
+# regressions in the demos themselves (e.g. an emit method that got renamed, or
+# a saga rollback that starts throwing).
+#
+# The scripts expect to be run from the repository root with the library and
+# examples directories on the include path, mirroring how they are documented:
+#     raku -Ilib -Iexamples examples/<name>.raku
+
+my @scripts = <
+    bank-account
+    todo-list
+    shopping-cart
+    broadcast-saga
+>;
+
+plan +@scripts;
+
+for @scripts -> $name {
+    my $path = "examples/$name.raku";
+    my $proc = run $*EXECUTABLE, '-Ilib', '-Iexamples', $path, :out, :err;
+
+    # Drain both handles so the child never blocks on a full pipe.
+    my $out = $proc.out.slurp(:close);
+    my $err = $proc.err.slurp(:close);
+
+    unless $proc.exitcode == 0 {
+        diag "STDOUT:\n$out" if $out;
+        diag "STDERR:\n$err" if $err;
+    }
+
+    is $proc.exitcode, 0, "examples/$name.raku runs to completion (exit 0)";
+}
+
+done-testing;

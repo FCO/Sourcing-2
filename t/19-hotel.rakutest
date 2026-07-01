@@ -1,0 +1,243 @@
+use Test;
+use Sourcing;
+use Sourcing::Plugin::Memory;
+
+use lib 'examples';
+use Hotel::Events;
+use Hotel::RoomAggregate;
+use Hotel::BookingAggregate;
+use Hotel::RoomAvailabilityProjection;
+use Hotel::BookingSaga;
+
+plan 8;
+
+sub reset() { Sourcing::Plugin::Memory.use }
+
+# Idiomatic event-driven dispatch: rebuild the saga from its history (which
+# re-queues its compensation), apply the new event live, then persist it so
+# later reconstructions replay it. Returns the saga so callers can read state.
+sub dispatch(Str $saga-id, $event) {
+    my $s = sourcing BookingSaga, :$saga-id;
+    $s.apply($event);
+    $*SourcingConfig.emit: $event;
+    $s
+}
+
+subtest 'RoomAggregate — create and check state' => {
+    reset();
+
+    my $room = sourcing RoomAggregate, :room-id<r1>;
+    $room.create: :room-type<deluxe>, :floor(3), :price-per-night(150.0.Rat);
+
+    my $r = sourcing RoomAggregate, :room-id<r1>;
+    is $r.room-type,       'deluxe',    'room-type is set';
+    is $r.floor,           3,           'floor is set';
+    is $r.price-per-night, 150.0.Rat,  'price-per-night is set';
+    is $r.status,          'available', 'initial status is available';
+}
+
+subtest 'RoomAvailabilityProjection — tracks counts per room type' => {
+    reset();
+
+    my $room1 = sourcing RoomAggregate, :room-id<r1>;
+    $room1.create: :room-type<deluxe>, :floor(3), :price-per-night(150.0.Rat);
+
+    my $room2 = sourcing RoomAggregate, :room-id<r2>;
+    $room2.create: :room-type<deluxe>, :floor(4), :price-per-night(180.0.Rat);
+
+    my $room3 = sourcing RoomAggregate, :room-id<r3>;
+    $room3.create: :room-type<standard>, :floor(1), :price-per-night(90.0.Rat);
+
+    my $deluxe = sourcing RoomAvailabilityProjection, :room-type<deluxe>;
+    is $deluxe.total-count,     2, 'two deluxe rooms total';
+    is $deluxe.available-count, 2, 'both deluxe rooms available';
+    is $deluxe.min-price, 150.0.Rat, 'min price is 150';
+    is $deluxe.max-price, 180.0.Rat, 'max price is 180';
+
+    my $standard = sourcing RoomAvailabilityProjection, :room-type<standard>;
+    is $standard.total-count,     1, 'one standard room total';
+    is $standard.available-count, 1, 'standard room is available';
+}
+
+subtest 'BookingAggregate — calculates total price from nights' => {
+    reset();
+
+    my $booking = sourcing BookingAggregate, :booking-id<b1>;
+    $booking.create:
+        :guest-name<Alice>,
+        :room-id<r1>,
+        :check-in<2026-07-01>,
+        :check-out<2026-07-04>,
+        :price-per-night(100.0.Rat);
+
+    my $b = sourcing BookingAggregate, :booking-id<b1>;
+    is $b.total-price, 300.0.Rat, '3 nights × 100 = 300 total price';
+    is $b.status,      'pending', 'initial status is pending';
+}
+
+subtest 'BookingSaga — happy path: request → payment → arrive → depart' => {
+    reset();
+
+    # Create the room first
+    my $room = sourcing RoomAggregate, :room-id<r10>;
+    $room.create: :room-type<suite>, :floor(5), :price-per-night(200.0.Rat);
+
+    # Drive the saga purely by events.
+    my $saga = dispatch 'saga1', BookingRequested.new(
+        :saga-id<saga1>,
+        :room-id<r10>,
+        :booking-id<bk1>,
+        :guest-name<Bob>,
+        :check-in<2026-08-01>,
+        :check-out<2026-08-03>,
+        :price-per-night(200.0.Rat),
+    );
+    is $saga.state, 'awaiting-payment', 'state is awaiting-payment after request';
+
+    # Check room is reserved
+    my $r = sourcing RoomAggregate, :room-id<r10>;
+    is $r.status, 'reserved', 'room is reserved';
+
+    # Check booking is pending
+    my $b = sourcing BookingAggregate, :booking-id<bk1>;
+    is $b.status, 'pending', 'booking is pending before payment';
+
+    $saga = dispatch 'saga1', PaymentReceived.new(:saga-id<saga1>, :booking-id<bk1>);
+    is $saga.state, 'confirmed', 'state is confirmed after payment';
+
+    my $b2 = sourcing BookingAggregate, :booking-id<bk1>;
+    is $b2.status, 'confirmed', 'booking is confirmed';
+
+    $saga = dispatch 'saga1', GuestArrived.new(:saga-id<saga1>, :room-id<r10>, :booking-id<bk1>);
+    is $saga.state, 'occupied', 'state is occupied after arrival';
+
+    my $r2 = sourcing RoomAggregate, :room-id<r10>;
+    is $r2.status, 'occupied', 'room is occupied after check-in';
+
+    $saga = dispatch 'saga1', GuestDeparted.new(:saga-id<saga1>, :room-id<r10>, :booking-id<bk1>);
+    is $saga.state, 'completed', 'state is completed after departure';
+
+    my $r3 = sourcing RoomAggregate, :room-id<r10>;
+    is $r3.status, 'available', 'room is available again after check-out';
+}
+
+subtest 'BookingSaga — payment timeout triggers anti-event rollback' => {
+    reset();
+
+    # Create room
+    my $room = sourcing RoomAggregate, :room-id<r20>;
+    $room.create: :room-type<deluxe>, :floor(2), :price-per-night(150.0.Rat);
+
+    # Check availability before booking
+    my $avail-before = sourcing RoomAvailabilityProjection, :room-type<deluxe>;
+    is $avail-before.available-count, 1, 'room is available before booking';
+
+    my $saga = dispatch 'saga2', BookingRequested.new(
+        :saga-id<saga2>,
+        :room-id<r20>,
+        :booking-id<bk2>,
+        :guest-name<Carol>,
+        :check-in<2026-09-01>,
+        :check-out<2026-09-02>,
+        :price-per-night(150.0.Rat),
+    );
+    is $saga.state, 'awaiting-payment', 'awaiting payment after request';
+
+    # Room should be reserved, availability reduced
+    my $avail-during = sourcing RoomAvailabilityProjection, :room-type<deluxe>;
+    is $avail-during.available-count, 0, 'room no longer available while reserved';
+
+    # Timeout fires before payment — the declarative anti-events run on rollback.
+    $saga = dispatch 'saga2', PaymentTimedOut.new(:saga-id<saga2>);
+    is $saga.state, 'cancelled', 'saga is cancelled after timeout';
+
+    # The queued anti-events should have released the room...
+    my $r = sourcing RoomAggregate, :room-id<r20>;
+    is $r.status, 'available', 'room is available again after rollback';
+
+    # ...and cancelled the booking.
+    my $b = sourcing BookingAggregate, :booking-id<bk2>;
+    is $b.status, 'cancelled', 'booking is cancelled after rollback';
+
+    # Availability restored
+    my $avail-after = sourcing RoomAvailabilityProjection, :room-type<deluxe>;
+    is $avail-after.available-count, 1, 'availability restored after rollback';
+}
+
+subtest 'RoomAggregate — cannot reserve already-reserved room' => {
+    reset();
+
+    my $room = sourcing RoomAggregate, :room-id<r30>;
+    $room.create: :room-type<standard>, :floor(1), :price-per-night(80.0.Rat);
+
+    my $r1 = sourcing RoomAggregate, :room-id<r30>;
+    $r1.reserve: :booking-id<bk10>, :guest-name<Dave>, :check-in<2026-10-01>, :check-out<2026-10-02>;
+
+    my $r2 = sourcing RoomAggregate, :room-id<r30>;
+    throws-like {
+        $r2.reserve: :booking-id<bk11>, :guest-name<Eve>, :check-in<2026-10-01>, :check-out<2026-10-02>
+    }, X::AdHoc, message => /:s not available/, 'cannot reserve already-reserved room';
+}
+
+subtest 'BookingSaga — an event with no candidate for the current state rolls back' => {
+    reset();
+
+    my $room = sourcing RoomAggregate, :room-id<r40>;
+    $room.create: :room-type<standard>, :floor(1), :price-per-night(100.0.Rat);
+
+    dispatch 'saga4', BookingRequested.new(
+        :saga-id<saga4>,
+        :room-id<r40>,
+        :booking-id<bk4>,
+        :guest-name<Frank>,
+        :check-in<2026-11-01>,
+        :check-out<2026-11-02>,
+        :price-per-night(100.0.Rat),
+    );
+
+    # GuestArrived only has a candidate for state 'confirmed'; the saga is still
+    # 'awaiting-payment'. No candidate matches, so this is a protocol violation:
+    # the saga rolls back (releasing the room, cancelling the booking) and fails.
+    my $saga = dispatch 'saga4', GuestArrived.new(:saga-id<saga4>, :room-id<r40>, :booking-id<bk4>);
+    is $saga.state, 'failed', 'unmatched event drives the saga to failed';
+    is (sourcing RoomAggregate, :room-id<r40>).status, 'available',
+        'room released by the rollback';
+    is (sourcing BookingAggregate, :booking-id<bk4>).status, 'cancelled',
+        'booking cancelled by the rollback';
+    is (sourcing BookingSaga, :saga-id<saga4>).state, 'failed',
+        'failed state is durable on replay';
+}
+
+subtest 'BookingSaga — per-state dispatch: a duplicate payment hits the no-op candidate' => {
+    reset();
+
+    my $room = sourcing RoomAggregate, :room-id<r50>;
+    $room.create: :room-type<suite>, :floor(6), :price-per-night(300.0.Rat);
+
+    dispatch 'saga5', BookingRequested.new(
+        :saga-id<saga5>,
+        :room-id<r50>,
+        :booking-id<bk5>,
+        :guest-name<Grace>,
+        :check-in<2026-12-01>,
+        :check-out<2026-12-03>,
+        :price-per-night(300.0.Rat),
+    );
+
+    my $saga = dispatch 'saga5', PaymentReceived.new(:saga-id<saga5>, :booking-id<bk5>);
+    is $saga.state, 'confirmed', 'first payment confirms the booking';
+
+    # A duplicate/late payment now matches apply(PaymentReceived) is
+    # on-state('confirmed') — a deliberate no-op. The booking stays confirmed and
+    # nothing is rolled back.
+    $saga = dispatch 'saga5', PaymentReceived.new(:saga-id<saga5>, :booking-id<bk5>);
+    is $saga.state, 'confirmed', 'duplicate payment is a no-op, still confirmed';
+    is (sourcing BookingAggregate, :booking-id<bk5>).status, 'confirmed',
+        'booking remains confirmed after the duplicate payment';
+
+    # The guest can still arrive afterwards: the flow was not disturbed.
+    $saga = dispatch 'saga5', GuestArrived.new(:saga-id<saga5>, :room-id<r50>, :booking-id<bk5>);
+    is $saga.state, 'occupied', 'flow continues normally after the duplicate';
+}
+
+done-testing;

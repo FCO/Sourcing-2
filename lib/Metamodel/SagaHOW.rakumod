@@ -3,6 +3,7 @@ use v6.e.PREVIEW;
 use Metamodel::AggregationHOW;
 use Sourcing::Saga;
 use Sourcing::Aggregation;
+use Sourcing::X::OptimisticLocked;
 
 =begin pod
 
@@ -23,7 +24,6 @@ declaration syntax. In addition to aggregation functionality, it provides:
 
 unit class Metamodel::SagaHOW is Metamodel::AggregationHOW;
 
-my $ON-STATE-ATTR = Attribute.^lookup('$!on-state');
 my %wrapped-sagas;
 
 method compose(Mu $saga, |) {
@@ -31,9 +31,9 @@ method compose(Mu $saga, |) {
 	self.compose-saga-id($saga);
 	self.generate-aggregation-binding($saga);
 	callsame;
-	# TODO: Re-enable after fixing command wrapper issue
-	# self.wrap-methods-with-exception-handling($saga);
-	self.generate-state-machine($saga);
+	self.wrap-methods-with-exception-handling($saga);
+	self.wrap-apply-with-state-dispatch($saga);
+	self.wrap-on-state-command-guards($saga);
 }
 
 =begin pod
@@ -52,34 +52,6 @@ method compose-saga-id(Mu $saga) {
 
 =begin pod
 
-=head2 method generate-state-machine
-
-Wraps apply methods to update the state based on return type declarations.
-
-=end pod
-
-method generate-state-machine(Mu $saga) {
-	my $key = $saga.^name;
-	return if %wrapped-sagas{$key}:exists;
-	%wrapped-sagas{$key} = True;
-	
-	my $state-attr = $saga.^attributes.first: *.name eq '$!state';
-	return unless $state-attr;
-
-	for $saga.^methods.grep: *.name eq 'apply' -> $method {
-		next if $method.^name ~~ / 'Proto' | 'Multi' /;
-		next if $method.?is_wrapper;
-		my $attr = $state-attr;
-		$method.wrap: my method (|args) {
-			my $result = callsame;
-			$attr.set_value: self, $result if $result.defined && $result !~~ Exception;
-			$result
-		}, :replace;
-	}
-}
-
-=begin pod
-
 =head2 method generate-aggregation-binding
 
 Discovers attributes typed as aggregations and generates write accessors
@@ -93,7 +65,11 @@ method generate-aggregation-binding(Mu $saga) {
 		my Mu:U $type = $attr.type;
 		next if $type.^name eq 'Positional';
 		next if $type.^name.starts-with('Positional[');
-		next unless $type.^does(Sourcing::Aggregation);
+		# `.^does` blows up on parametric role groups (e.g. Numeric, Real) with
+		# "Too many positionals", so an attribute typed with one of those would
+		# otherwise crash compose. Such a type can never be an aggregation, so
+		# treat an unresolvable check as "not an aggregation" and skip it.
+		next unless try { $type.^does(Sourcing::Aggregation) };
 		my $name = $attr.name.substr(2);
 		my $attr-copy = $attr;
 		$saga.^add_method: $name, my method () {
@@ -115,23 +91,169 @@ method wrap-methods-with-exception-handling(Mu $saga) {
 	my $key = $saga.^name ~ '-exception';
 	return if %wrapped-sagas{$key}:exists;
 	%wrapped-sagas{$key} = True;
-	
-	for $saga.^methods.grep({ .name ne 'apply' && .name ne 'rollback' }) -> $method {
+
+	for $saga.^methods.grep({ .name ne 'apply' && .name ne 'rollback' && .name ne 'anti-event' }) -> $method {
 		next if $method.?is_wrapper;
 		next if $method.name.starts-with('^');
 		next if $method.name eq 'new';
-		
+
 		$method.wrap: method (|args) {
-			callsame;
 			CATCH {
+				when Sourcing::X::OptimisticLocked { .rethrow }
 				default {
 					self.rollback if self.^can('rollback');
-					# Transition to failed state if state attribute exists
 					my $state-attr = self.^attributes.first: *.name eq '$!state';
 					$state-attr.set_value(self, 'failed') if $state-attr;
 					.rethrow
 				}
 			}
+			callsame
+		}
+	}
+}
+
+=begin pod
+
+=head2 method wrap-apply-with-state-dispatch
+
+Replaces the saga's C<apply> dispatch with a single state-aware dispatcher and,
+in the same place, runs the state-machine transition and anti-event capture.
+
+A saga may declare several C<apply> candidates for the same event type, each
+tagged with a different C<is on-state(...)>. Native multi-dispatch cannot
+disambiguate same-signature candidates, and C<.wrap> hides a candidate's
+signature and its C<on-state> tag — so per-candidate wrapping cannot be combined
+with this selection. Instead the C<apply> proto is wrapped once: it reads the
+pristine candidates (correct signatures and C<on-state> tags), picks the one
+whose tag matches the saga's current state, and invokes its body directly.
+
+For the selected candidate this dispatcher also:
+
+=item Builds and queues the inverse via the matching C<anti-event(EventType)>
+handler (if any) B<before> running the body — under forced C<$*SourcingReplay>
+with an C<@*SourcingEvents> accumulator, so the emit methods only construct the
+inverse events and never emit. Because this runs inside C<apply>, which replays
+on every reconstruction, the compensation queue is rebuilt durably.
+
+=item Applies the state-machine transition afterwards: if the saga has a
+C<$!state> attribute, it is set from the candidate's (defined, non-Exception)
+return value.
+
+A candidate without an C<on-state> tag is a wildcard (used by the saga's internal
+events); C<on-state> candidates take precedence. When B<no> candidate matches the
+event in the current state it is treated as a protocol violation: the saga rolls
+back (emitting its queued anti-events) and moves to C<'failed'>. To accept an
+event in a state on purpose — for example to ignore a benign duplicate — declare
+a no-op candidate with the matching C<is on-state(...)>.
+
+=end pod
+
+method wrap-apply-with-state-dispatch(Mu $saga) {
+	my $key = $saga.^name ~ '-state-dispatch';
+	return if %wrapped-sagas{$key}:exists;
+	%wrapped-sagas{$key} = True;
+
+	my $proto = $saga.^find_method: 'apply';
+	return unless $proto;
+
+	# Capture the pristine candidates up front: their signatures (for event-type
+	# matching) and on-state tags are intact, and calling them runs just the body.
+	my @candidates = $proto.candidates;
+	my $state-attr = $saga.^attributes.first: *.name eq '$!state';
+	my $has-anti   = ?($saga.^methods.first: *.name eq 'anti-event');
+
+	# The handled event type of a candidate (first non-invocant positional).
+	# Note: a Parameter's .type is a type object (undefined), so `//` must not be
+	# used here — it would treat every type as "missing" and collapse to Mu.
+	my sub evt-type($c) {
+		with $c.signature.params.first({ !.invocant && !.named }) {
+			.type
+		} else {
+			Mu
+		}
+	}
+
+	$proto.wrap: my method (|args) {
+		my $event = args[0];
+
+		# Select the candidate for this event type whose on-state matches the
+		# current state; fall back to the untagged (wildcard) candidates.
+		my @cands    = @candidates.grep: *.cando: \(self, $event);
+		my @stated   = @cands.grep: -> $c { $c.?on-state.defined && $c.matches(self.state) };
+		my @wildcard = @cands.grep: -> $c { !$c.?on-state.defined };
+		my @group    = @stated || @wildcard;     # state-specific candidates win over wildcards
+
+		# Within the group prefer the most specific event type, so a catch-all
+		# apply(Any) never shadows a specific handler (matching native dispatch).
+		# Keep a candidate when no other has a strictly narrower type. Strict
+		# subtype is tested with smartmatch both ways ($td is-a $tc but not vice
+		# versa) — identity (=:=) is unreliable here because Parameter.type hands
+		# back a fresh wrapper each call. Count with .elems, not .first: a matching
+		# type object is falsy, so the value .first returns can't signal a hit.
+		my $chosen = (@group.grep: -> $c {
+			my $tc = evt-type $c;
+			(@group.grep: -> $d { my $td = evt-type $d; ($td ~~ $tc) && !($tc ~~ $td) }).elems == 0
+		}).head // @group.head;
+
+		# No candidate handles this event in the current state: a saga protocol
+		# violation. Fail the same way an uncaught exception does — roll back
+		# (emitting the queued anti-events) and move to 'failed'. To accept an
+		# event in a state on purpose (e.g. a benign duplicate), declare a no-op
+		# candidate with the matching is on-state(...).
+		without $chosen {
+			self.rollback if self.^can('rollback');
+			$state-attr.set_value(self, 'failed') if $state-attr;
+			return Nil;
+		}
+
+		# Capture the inverse event(s) for rollback before the body runs.
+		if $has-anti && !$*SAGA-ROLLING-BACK {
+			my $anti = self.^find_method('anti-event');
+			if $anti && $anti.cando: \(self, $event) {
+				my @recs = do {
+					my @*SourcingEvents;
+					my $*SourcingReplay = True;
+					self.anti-event($event);
+					@*SourcingEvents;
+				};
+				self.queue-compensation($_) for @recs;
+			}
+		}
+
+		# Run the chosen body, then apply the state-machine transition.
+		my $result = $chosen(self, $event);
+		$state-attr.set_value(self, $result)
+			if $state-attr && $result.defined && $result !~~ Exception;
+		$result
+	};
+}
+
+=begin pod
+
+=head2 method wrap-on-state-command-guards
+
+Installs the runtime guard for C<is on-state(...)> on B<non-C<apply>> methods
+(typically commands). Such a method may only run when the saga is in one of its
+tagged states; otherwise it throws. The guard is wrapped here, at compose time,
+so it sits B<outside> the C<is command> retry wrapper — an inner wrapper cannot
+re-dispatch through C<is command>'s C<nextcallee> mechanism, so a plain outer
+C<callsame> is the only thing that composes. C<apply> candidates are dispatched
+by state instead (see C<wrap-apply-with-state-dispatch>) and are skipped here.
+
+=end pod
+
+method wrap-on-state-command-guards(Mu $saga) {
+	my $key = $saga.^name ~ '-on-state-guard';
+	return if %wrapped-sagas{$key}:exists;
+	%wrapped-sagas{$key} = True;
+
+	for $saga.^methods.grep({ .name ne 'apply' && .?on-state.defined }) -> $method {
+		next if $method.?is_wrapper;
+		$method.wrap: my method (|c) {
+			die "Method { $method.name } can only be called in state(s) "
+				~ "{ $method.on-state.raku }; current state: { $.state }"
+				unless $method.matches: $.state;
+			callsame
 		}
 	}
 }

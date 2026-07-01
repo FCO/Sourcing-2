@@ -22,6 +22,7 @@ unit role Sourcing::Saga;
 has Pair  @.timeout-schedule = [];
 has Hash  $!timeout-handlers = {};
 has Callable @!undo-blocks = [];
+has Bool  $!rolled-back = False;
 
 method timeout-handlers() { $!timeout-handlers }
 
@@ -86,6 +87,30 @@ method undo(Callable $block) {
 
 =begin pod
 
+=head2 method queue-compensation
+
+Queues an automatically-derived anti-event for emission on rollback. Called by
+the saga metaclass while applying an event whose C<anti-event> handler produced
+an inverse event. C<%rec> carries the built inverse C<event>, its target
+aggregate C<type>, and the C<ids> identifying the aggregate stream. The queued
+block re-emits the inverse at rollback time, fetching the aggregate's current
+version so the locking emit succeeds.
+
+=end pod
+
+method queue-compensation(%rec) {
+	my $event = %rec<event>;
+	my $type  = %rec<type>;
+	my %ids   = %rec<ids>;
+	@!undo-blocks.push: {
+		my %map{Mu:U} = $type.^handled-events-map;
+		my $current-version = ($*SourcingConfig.get-events-after: -1, %ids, %map).elems - 1;
+		$*SourcingConfig.emit: $event, :$type, :ids(%ids), :$current-version;
+	}
+}
+
+=begin pod
+
 =head2 method timeout-in
 
 Schedules a timeout to call a method on the saga. If no method name is provided,
@@ -110,15 +135,23 @@ method timeout-in(Str $method-name = 'rollback', *%params) {
 
 =head2 method rollback
 
-Executes all registered undo blocks in reverse order and clears the undo block stack.
+Executes all registered undo blocks in reverse order (LIFO) and clears the
+stack. Idempotent: a second call is a no-op. The "rolled back" state is rebuilt
+on every replay, but the inverse events are only emitted when not replaying —
+during reconstruction they are already in the stream and must not be re-emitted.
 
 =end pod
 
 method rollback() {
-	# Execute undo blocks in reverse order (LIFO)
-	while @!undo-blocks {
-		my $block = @!undo-blocks.pop;
-		$block();
+	return if $!rolled-back;
+	$!rolled-back = True;
+	my $*SAGA-ROLLING-BACK = True;
+	# Emit compensations only when live; on replay the inverses already exist.
+	if !$*SourcingReplay {
+		while @!undo-blocks {
+			my $block = @!undo-blocks.pop;
+			$block();
+		}
 	}
 	@!undo-blocks = [];
 }

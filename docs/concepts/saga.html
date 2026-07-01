@@ -38,92 +38,94 @@
             </ul>
 
             <h2>Declaring a Saga</h2>
-            <p>Use the <code>saga</code> keyword to declare a saga class. Sagas are built on top of aggregations, so they inherit all aggregation capabilities plus additional saga-specific features:</p>
+            <p>Use the <code>saga</code> keyword to declare a saga class. Sagas are built on top of aggregations, so they inherit all aggregation capabilities plus additional saga-specific features. Sagas are <strong>event-driven</strong>: they react to events through <code>apply</code> handlers, which source the aggregates they coordinate and issue commands to them. Each <code>apply</code> returns the saga's next state.</p>
             <pre><code>use Sourcing;
 
-saga OrderSaga {
+saga BookingSaga {
     has Str $.saga-id is projection-id;
-    has Str $.state = 'pending';
-    has Int $.order-id;
-    has Int $.customer-id;
+    has Str $.state   = 'pending';
 
-    multi method apply(OrderRequested $e --> 'creating') {
-        $!order-id = $e.order-id;
-        $!customer-id = $e.customer-id;
+    # React to a booking request: reserve the room and open the booking.
+    multi method apply(BookingRequested (:$room-id, :$booking-id, |)) is on-state('pending') {
+        sourcing(Room,    :$room-id).reserve: :$booking-id;
+        sourcing(Booking, :$booking-id).open;
+        'awaiting-payment'
     }
 
-    multi method apply(OrderCompleted $e --> 'completed') { }
-
-    method cancel-order() is command {
-        self.undo: { self.send-command: Order, { :order-id($!order-id) }, CancelOrder.new };
+    multi method apply(PaymentReceived (:$booking-id, |)) is on-state('awaiting-payment') {
+        sourcing(Booking, :$booking-id).confirm;
+        'confirmed'
     }
 
-    method handle-timeout() {
-        self.rollback;
-        $!state = 'cancelled';
+    # The declarative inverse of a booking request — see Compensation below.
+    multi method anti-event(BookingRequested (:$room-id, :$booking-id, |)) {
+        sourcing(Room,    :$room-id).released: :$booking-id;
+        sourcing(Booking, :$booking-id).cancelled;
     }
 }</code></pre>
+            <p>The canonical way to drive a saga is to rebuild it from its history and apply the new event live, then persist the event so later reconstructions replay it:</p>
+            <pre><code>my $saga = sourcing BookingSaga, :$saga-id;   # rebuild from history
+$saga.apply($event);                          # react live
+$*SourcingConfig.emit: $event;                # persist for replay</code></pre>
 
-            <h2>State Machine</h2>
-            <p>Sagas use a declarative state machine. Each <code>apply</code> method declares its resulting state using the return type syntax <code>--> 'state-name'</code>:</p>
-            <pre><code>multi method apply(OrderPlaced $e --> 'processing') {
-    $!order-id = $e.order-id;
-    'processing'  # State transitions to 'processing'
+            <h2>State Machine and Per-State Dispatch</h2>
+            <p>Sagas use a declarative state machine. Each <code>apply</code> method returns its resulting state (with the return-type syntax <code>--> 'state-name'</code> or simply by returning the string), and the saga tracks the current state in <code>$.state</code>.</p>
+            <p>On an <code>apply</code> candidate the <code>is on-state(...)</code> trait is a <strong>dispatch key</strong>, not a guard: a saga may declare <strong>several <code>apply</code> candidates for the same event type</strong>, each tagged with a different state, and the framework runs the one whose tag matches the current state. <code>on-state</code> accepts a single state, a list (<code>&lt;a b&gt;</code>), or a junction (<code>'a' | 'b'</code>, <code>none &lt;done failed&gt;</code>). (On a non-<code>apply</code> method such as a <code>command</code>, the same trait is instead a runtime guard that throws when called in the wrong state.)</p>
+            <pre><code>multi method apply(PaymentReceived (:$booking-id, |)) is on-state('awaiting-payment') {
+    sourcing(Booking, :$booking-id).confirm;
+    'confirmed'
 }
 
-multi method apply(PaymentConfirmed $e --> 'ready-to-ship') { } # State transitions to 'ready-to-ship'
-</code></pre>
-            <p>The saga automatically tracks the current state in <code>$.state</code>. You can also guard command methods to specific states using the <code>is on-state</code> trait:</p>
-            <pre><code>method ship-order() is on-state('ready-to-ship') is command {
-    $.order-shipped: :tracking(self.generate-tracking);
-}</code></pre>
-
-            <h2>Compensation and Rollback</h2>
-            <p>When a step succeeds, register an undo block that can reverse it if a later step fails:</p>
-            <pre><code>multi method apply(PaymentProcessed $e --> 'paying') {
-    # Store the undo block immediately after the action succeeds
-    self.undo: *.payment-refund: $e.amount;
-
-    # Continue to next step
-    self.send-command: Inventory, { :order-id($!order-id) }, InventoryReserved.new;
-}</code></pre>
-            <p>If any exception occurs, the saga automatically:</p>
-            <ol>
-                <li>Executes all undo blocks in <strong>LIFO order</strong> (last-in, first-out)</li>
-                <li>Clears the undo block stack</li>
-                <li>Transitions to the <code>'failed'</code> state</li>
-            </ol>
-            <pre><code>method rollback() is command {
-    # Automatically called on any unhandled exception
-    # Executes undo blocks in reverse order of registration
-}</code></pre>
+# A second candidate for the SAME event in a later state — a duplicate or late
+# payment after the booking is already confirmed is a deliberate no-op.
+multi method apply(PaymentReceived $) is on-state('confirmed') { }</code></pre>
+            <p>An <code>apply</code> candidate <em>without</em> an <code>on-state</code> tag is a wildcard that runs in any state; tagged candidates take precedence, and the most specific event type wins (so a catch-all <code>apply(Any)</code> never shadows a specific handler).</p>
 
             <div class="callout warning">
-                <div class="callout-title">Undo Block Design</div>
-                <p>Always register undo blocks <em>immediately after</em> a step succeeds. Don't wait — if an exception happens before you register, there's no way to undo that step!</p>
+                <div class="callout-title">No matching candidate ⇒ rollback</div>
+                <p>If an event reaches the saga and <strong>no</strong> <code>apply</code> candidate matches the current state, it is treated as a protocol violation: the saga rolls back (emitting its queued anti-events) and moves to the <code>'failed'</code> state. To accept an event in a state on purpose — for example to ignore a benign duplicate — declare a no-op candidate with the matching <code>is on-state(...)</code>, as shown above.</p>
             </div>
 
-            <h3>Undo Blocks</h3>
-            <p>Instead of registering compensation events, you can register <strong>undo blocks</strong> — callables that execute directly during rollback. This is useful when you need to call methods on aggregates without generating new compensation events.</p>
-            <pre><code>multi method apply(TransferExecuted $e --> 'depositing') {
-    # Withdraw from source account
-    $!from-account.withdraw: $!amount;
+            <h2>Compensation and Rollback</h2>
+            <p>Compensation is <strong>declarative</strong>. For an event the saga reacts to, declare an <code>anti-event</code> handler that builds the inverse — the event(s) that undo what the reaction did:</p>
+            <pre><code>multi method apply(BookingRequested (:$room-id, :$booking-id, |)) is on-state('pending') {
+    sourcing(Room,    :$room-id).reserve: :$booking-id;   # reserve the room
+    sourcing(Booking, :$booking-id).open;                 # open the booking
+    'awaiting-payment'
+}
 
-    # Register an undo block to reverse this action
-    # The block receives the saga as $_, enabling method chaining
+# Its inverse: release the room and cancel the booking.
+multi method anti-event(BookingRequested (:$room-id, :$booking-id, |)) {
+    sourcing(Room,    :$room-id).released: :$booking-id;
+    sourcing(Booking, :$booking-id).cancelled;
+}</code></pre>
+            <p>On every <code>apply</code>, the framework runs the matching <code>anti-event</code> (under replay, so it only <em>builds</em> the inverse events without emitting them) and queues them. On <code>rollback</code> the queued inverses are emitted in <strong>reverse order</strong>. Because the queue is rebuilt from <code>apply</code> on every reconstruction, compensation survives reload with no extra persistence — and no manual bookkeeping.</p>
+            <p>Rollback happens automatically when:</p>
+            <ol>
+                <li>any method throws an uncaught exception (the saga rolls back and transitions to <code>'failed'</code>), or</li>
+                <li>an event arrives that no <code>apply</code> candidate handles in the current state, or</li>
+                <li>you call <code>self.rollback</code> explicitly — typically from an <code>apply</code> handler for a failure or timeout event.</li>
+            </ol>
+            <pre><code># Drive rollback from an event — purely event-driven.
+multi method apply(PaymentTimedOut $) is on-state('awaiting-payment') {
+    self.rollback;   # emits the queued anti-events in reverse order
+    'cancelled'
+}</code></pre>
+            <p><code>rollback</code> is idempotent and replay-safe: it emits the inverses only when running live (during replay the inverses are already in the stream), and a second call is a no-op.</p>
+
+            <div class="callout">
+                <div class="callout-title">anti-event uses emit methods, not commands</div>
+                <p>An <code>anti-event</code> handler sources the aggregate and calls its <em>emit</em> method (e.g. <code>released</code>), not its <em>command</em> (e.g. <code>release</code>). This is on purpose: a compensation undoes a fact that already happened, so it emits the inverse directly and bypasses the forward command's validation, which exists to protect forward operations.</p>
+            </div>
+
+            <h3>Undo Blocks (escape hatch)</h3>
+            <p>For one-off cases where a declarative <code>anti-event</code> doesn't fit, you can still register an <strong>undo block</strong> — a callable executed directly during rollback. Unlike <code>anti-event</code>, undo blocks are <em>not</em> rebuilt on reconstruction, so prefer <code>anti-event</code> for durable compensation and reach for <code>undo</code> only as an escape hatch.</p>
+            <pre><code>multi method apply(TransferExecuted $e --> 'depositing') {
+    $!from-account.withdraw: $!amount;
+    # The block receives the saga as $_, enabling method chaining.
     $.undo: *.from-account.deposit: $!amount;
 }</code></pre>
-            <p>Undo blocks execute in LIFO order during rollback. They receive the saga instance as the topic, allowing concise method chaining:</p>
-            <pre><code>method rollback() is command {
-    # Executes all undo blocks in reverse order of registration
-}</code></pre>
-            <p>When to use undo blocks:</p>
-            <table>
-                <tr><th>When to Use</th><th>Example</th></tr>
-                <tr><td>Direct aggregate manipulation</td><td>Reversing a withdrawal directly</td></tr>
-                <tr><td>Simpler workflows</td><td>Cancelling an order by sending a command</td></tr>
-                <tr><td>When events aren't needed</td><td>Temporary state changes</td></tr>
-            </table>
+            <p>Undo blocks and queued anti-events share the same LIFO stack, so mixed registrations still unwind in reverse order during rollback.</p>
 
             <h2>Timeout Handling</h2>
             <p>Long-running processes need timeouts to handle failure scenarios like a service going down. Sagas support scheduled timeouts. By default, timeouts will call the <code>rollback</code> method to automatically undo any completed steps:</p>
@@ -179,65 +181,64 @@ method cancel-if-no-payment() {
 
             <h2>Saga Design Rules</h2>
             <ul>
-                <li><strong>Design undo blocks first.</strong> For every step, ask: "if this fails later, how do we undo it?"</li>
-                <li><strong>Register undo blocks immediately.</strong> After each successful step, register its undo block before proceeding.</li>
+                <li><strong>Stay event-driven.</strong> React to events in <code>apply</code>; source aggregates and issue commands from there. Drive failure and timeout paths with events too.</li>
+                <li><strong>Declare an anti-event per reaction.</strong> For every event the saga reacts to, ask: "if we roll back, what undoes this?" and declare the matching <code>anti-event</code>.</li>
+                <li><strong>Whitelist the states an event is valid in.</strong> Use <code>is on-state(...)</code>; add a no-op candidate where a duplicate or late event should be ignored. Anything unhandled rolls back.</li>
                 <li><strong>Keep sagas idempotent.</strong> Target aggregations should handle repeated commands gracefully.</li>
-                <li><strong>Use timeouts for critical paths.</strong> If a step takes too long, assume it failed and undo.</li>
+                <li><strong>Use timeouts for critical paths.</strong> If a step takes too long, assume it failed and roll back.</li>
                 <li><strong>Name states after user-facing outcomes.</strong> <code>'completed'</code>, <code>'cancelled'</code>, <code>'failed'</code></li>
             </ul>
 
             <h2>Example: Order Creation Saga</h2>
+            <p>Event-driven throughout: each <code>apply</code> reacts to an event, sources the aggregates it coordinates and issues commands; each reaction declares its <code>anti-event</code>; failure and timeout are driven by events; and per-state dispatch keeps the flow honest.</p>
             <pre><code>use Sourcing;
 
-# Events
-class OrderRequested    { has $.saga-id; has $.customer-id; has $.total }
-class PaymentAuthorized { has $.saga-id; has $.payment-id }
-class InventoryReserved { has $.saga-id; has $.reservation-id }
-class OrderShipped      { has $.saga-id; has $.tracking-number }
-class OrderCompleted    { has $.saga-id }
+# Saga trigger events (the saga's own stream, keyed by saga-id)
+class OrderRequested  { has $.saga-id; has $.order-id; has $.total }
+class PaymentTaken    { has $.saga-id; has $.order-id }
+class StockReserved   { has $.saga-id; has $.order-id }
+class PaymentTimedOut { has $.saga-id }
 
-# Sagas
 saga CreateOrder {
-    has Str     $.saga-id is projection-id;
-    has Str     $.state = 'pending';
+    has Str $.saga-id is projection-id;
+    has Str $.state   = 'pending';
 
-    multi method apply(OrderRequested $e --> 'authorizing') {
-        self.send-command: Payment, { :saga-id($!saga-id) }, Authorize.new(:amount($e.total));
-        self.timeout-in: 'payment-timeout', :1minute;
+    multi method apply(OrderRequested (:$order-id, :$total, |)) is on-state('pending') {
+        sourcing(Payment, :$order-id).charge: :amount($total);
+        self.timeout-in: 'rollback', :1minute;   # auto-cancel if nothing happens
+        'charging'
     }
 
-    multi method apply(PaymentAuthorized $e --> 'reserving') {
-        self.cancel-timeout: 'payment-timeout';
-        self.send-command: Inventory, { :saga-id($!saga-id) }, Reserve.new(:items($e.items));
-        self.undo: { self.send-command: Payment, { :saga-id($!saga-id) }, Refund.new(:payment-id($e.payment-id)) };
-        self.timeout-in: 'inventory-timeout', :2minutes;
+    multi method apply(PaymentTaken (:$order-id, |)) is on-state('charging') {
+        self.cancel-timeout: 'rollback';
+        sourcing(Inventory, :$order-id).reserve;
+        'reserving'
     }
 
-    multi method apply(InventoryReserved $e --> 'shipping') {
-        self.cancel-timeout: 'inventory-timeout';
-        self.send-command: Shipping, { :saga-id($!saga-id) }, Ship.new(:address($e.address));
-        self.undo: { self.send-command: Inventory, { :saga-id($!saga-id) }, Release.new(:reservation-id($e.reservation-id)) };
+    multi method apply(StockReserved (:$order-id, |)) is on-state('reserving') {
+        sourcing(Shipping, :$order-id).schedule;
+        'completed'
     }
 
-    multi method apply(OrderShipped $e --> 'completed') {
-        self.undo: { self.send-command: Shipping, { :saga-id($!saga-id) }, Cancel.new(:tracking($e.tracking-number)) };
-    }
-
-    method payment-timeout {
+    # A timeout (or any failure) rolls back: the queued anti-events fire in reverse.
+    multi method apply(PaymentTimedOut $) is on-state('charging') {
         self.rollback;
-        $!state = 'payment-failed';
+        'cancelled'
     }
 
-    method inventory-timeout {
-        self.rollback;
-        $!state = 'inventory-failed';
+    # Declarative inverses, queued automatically and emitted in reverse on rollback.
+    multi method anti-event(OrderRequested (:$order-id, |)) {
+        sourcing(Payment, :$order-id).refunded;
+    }
+    multi method anti-event(PaymentTaken (:$order-id, |)) {
+        sourcing(Inventory, :$order-id).released;
     }
 }</code></pre>
 
             <h2>Next Steps</h2>
             <ul>
                 <li>See the <a href="../api/saga.html">Sourcing::Saga API Reference</a> for all available methods</li>
-                <li>Learn about the <a href="commands.html">is on-state</a> trait for state-guarded commands</li>
+                <li>Learn about the <a href="../api/traits.html">is on-state</a> trait for per-state apply dispatch</li>
                 <li>Read about <a href="../api/metaclasses.html">Metaclasses</a> — how the saga keyword works</li>
                 <li>Explore <a href="aggregations.html">Aggregations</a> — sagas build on aggregation functionality</li>
             </ul>

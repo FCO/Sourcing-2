@@ -111,7 +111,7 @@ saga VerifyTimeoutSaga {
 saga ExceptionSaga {
 	has Str $.saga-id is projection-id;
 	has Str $.state = 'pending';
-	has Int @.compensations-emitted;
+	has @.compensations-emitted;
 
 	multi method apply(Any $e --> 'pending') { }
 
@@ -228,8 +228,10 @@ subtest 'verify-timeouts fires expired timeouts' => {
 subtest 'Exception triggers rollback' => {
 	my $saga = sourcing ExceptionSaga, :saga-id<exception-test>;
 
-	ok ExceptionSaga.^can('do-failing-action'), 'ExceptionSaga has do-failing-action method';
-	# Note: Exception handling not yet implemented, so we just test the method exists
+	throws-like { $saga.do-failing-action }, X::AdHoc, message => 'Simulated failure',
+		'exception is rethrown after rollback';
+	is-deeply $saga.compensations-emitted, ['undo'], 'undo blocks were executed on exception';
+	is $saga.state, 'failed', 'state transitions to failed on exception';
 }
 
 subtest 'TimeOutScheduled event rebuilds timeout state' => {
@@ -493,6 +495,36 @@ subtest 'undo blocks are cleared after rollback' => {
 	$saga.rollback;  # Second rollback should not execute any blocks
 
 	is $saga.undo-order.join(','), '3,2,1', 'blocks executed on first rollback';
+}
+
+class Shipped { has $.saga-id }
+
+saga ShipSaga {
+	has Str $.saga-id is projection-id;
+	has Str $.state = 'pending';
+
+	multi method apply(Shipped $ --> 'shipped') { }
+
+	# is on-state guards command methods: they may only run in the given state.
+	method ship() is on-state('pending') is command { $.shipped }
+	method redispatch() is on-state('shipped') is command { 'redispatched' }
+}
+
+subtest 'is on-state guards command methods' => {
+	# ship() is valid in 'pending'.
+	my $a = sourcing ShipSaga, :saga-id<g1>;
+	lives-ok { $a.ship }, 'command runs in the allowed state';
+	is (sourcing ShipSaga, :saga-id<g1>).state, 'shipped', 'state advanced to shipped';
+
+	# redispatch() requires 'shipped'; calling it on a fresh 'pending' saga throws.
+	my $b = sourcing ShipSaga, :saga-id<g2>;
+	throws-like { $b.redispatch }, Exception,
+		message => /:s can only be called in state/,
+		'command rejected in the wrong state';
+
+	# ...and is allowed once the saga has reached 'shipped'.
+	my $c = sourcing ShipSaga, :saga-id<g1>;
+	lives-ok { $c.redispatch }, 'command allowed in the correct state';
 }
 
 done-testing;
